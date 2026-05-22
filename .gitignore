@@ -1,0 +1,24 @@
+# Build products
+*.app/
+*.dSYM/
+DerivedData/
+build/
+.build/
+
+# macOS metadata
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+._*
+.Spotlight-V100
+.Trashes
+
+# Local editor/agent noise
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
