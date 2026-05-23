@@ -61,11 +61,13 @@ There is no test command currently.
 - Constants:
   - UI strings: `CTTitleStart`, `CTTitleRunIndefinitely`, etc.
   - layout values: `CTMenuWidth`, `CTMenuPadding`, etc.
-  - time values: `CTSecondsPerHour`, `CTSecondsPerDay`.
+  - time values: `CTSecondsPerMinute`, `CTSecondsPerHour`, `CTSecondsPerDay`.
 - State sync:
   - Do not read UI as source of truth except control values at Start time.
   - `PowerController.active` determines Start/Stop and status icon state.
   - Timer expiry must notify UI through `PowerControllerDidChangeNotification`.
+  - Finite countdown UI is derived from `PowerController.endsAt`; do not run its UI timer while the popover is closed, inactive, or indefinite.
+  - Duration input must parse as strict positive integer text and must not exceed `CTMaximumFiniteDurationSeconds`; do not rely on `NSTextField.doubleValue`.
 - Error handling:
   - `PowerController` returns `BOOL` + `NSError **` for assertion creation failure.
   - UI displays errors through `errorLabel`.
@@ -119,6 +121,8 @@ Functional QA checklist:
 - Start creates assertion and button becomes Stop
 - Stop releases assertion and button becomes Start
 - finite duration auto-stops and UI/icon sync back to off
+- finite active session shows remaining time and stop clock time in the popover
+- finite duration accepts minutes/hours/days, rejects zero, negative, non-numeric, decimal, and excessive values
 - indefinite mode does not persist across relaunch
 - Launch at Login checkbox reflects `SMAppService` state
 

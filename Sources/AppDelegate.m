@@ -14,6 +14,10 @@
 @property (nonatomic) NSButton *keepDisplayAwakeButton;
 @property (nonatomic) NSButton *launchAtLoginButton;
 @property (nonatomic) NSTextField *errorLabel;
+@property (nonatomic) NSTextField *timeLabel;
+@property (nonatomic, nullable) NSTimer *countdownTimer;
+@property (nonatomic) NSDateFormatter *timeFormatter;
+@property (nonatomic) NSNumberFormatter *durationFormatter;
 @property (nonatomic, nullable) id outsideClickMonitor;
 @end
 
@@ -31,6 +35,7 @@
 
 - (void)applicationWillTerminate:(NSNotification *)notification {
     [self.power stop];
+    [self stopCountdownTimer];
 }
 
 - (void)applicationDidResignActive:(NSNotification *)notification {
@@ -39,6 +44,7 @@
 - (void)dealloc {
     [NSNotificationCenter.defaultCenter removeObserver:self];
     [self removeOutsideClickMonitor];
+    [self stopCountdownTimer];
 }
 
 
@@ -54,7 +60,7 @@
 - (void)configurePopover {
     self.popover = [NSPopover new];
     self.popover.behavior = NSPopoverBehaviorTransient;
-    self.popover.contentSize = NSMakeSize(CTMenuWidth, 150.0);
+    self.popover.contentSize = NSMakeSize(CTMenuWidth, CTMenuHeight);
 
 
     NSViewController *controller = [NSViewController new];
@@ -63,51 +69,65 @@
 }
 
 - (NSView *)buildContentView {
-    NSView *view = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, CTMenuWidth, 150.0)];
+    NSView *view = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, CTMenuWidth, CTMenuHeight)];
     CGFloat x = CTMenuPadding;
     CGFloat width = CTMenuWidth - (CTMenuPadding * 2.0);
 
 
     self.indefiniteButton = [NSButton checkboxWithTitle:CTTitleRunIndefinitely target:self action:@selector(controlChanged:)];
-    self.indefiniteButton.frame = NSMakeRect(x, 112.0, width, 24.0);
+    self.indefiniteButton.frame = NSMakeRect(x, CTIndefiniteY, width, CTCheckboxHeight);
 
     [view addSubview:self.indefiniteButton];
 
-    self.durationField = [NSTextField textFieldWithString:@"2"];
+    self.durationField = [NSTextField textFieldWithString:CTDefaultDurationText];
     self.durationField.placeholderString = CTDurationPlaceholder;
     self.durationField.target = self;
     self.durationField.action = @selector(controlChanged:);
-    self.durationField.frame = NSMakeRect(x, 78.0, CTDurationFieldWidth, 28.0);
+    self.durationFormatter = [NSNumberFormatter new];
+    self.durationFormatter.numberStyle = NSNumberFormatterNoStyle;
+    self.durationFormatter.allowsFloats = NO;
+    self.durationFormatter.minimum = @(CTMinimumDurationValue);
+    self.durationFormatter.maximum = @(CTMaximumFiniteDurationSeconds / CTSecondsPerMinute);
+    self.durationField.formatter = self.durationFormatter;
+    self.durationField.frame = NSMakeRect(x, CTDurationY, CTDurationFieldWidth, CTTextFieldHeight);
 
     [view addSubview:self.durationField];
 
     self.unitPopup = [NSPopUpButton new];
     self.unitPopup.controlSize = NSControlSizeRegular;
-    [self.unitPopup addItemsWithTitles:@[@"Hours", @"Days"]];
-    self.unitPopup.frame = NSMakeRect(x + CTDurationFieldWidth + CTControlSpacing, 76.0, 116.0, 32.0);
+    [self.unitPopup addItemsWithTitles:@[CTUnitMinutesTitle, CTUnitHoursTitle, CTUnitDaysTitle]];
+    [self.unitPopup selectItemAtIndex:CTUnitHoursIndex];
+    self.unitPopup.frame = NSMakeRect(x + CTDurationFieldWidth + CTControlSpacing, CTUnitPopupY, CTUnitPopupWidth, CTPopupHeight);
 
     [view addSubview:self.unitPopup];
 
     self.keepDisplayAwakeButton = [NSButton checkboxWithTitle:CTTitleKeepDisplayAwake target:nil action:nil];
-    self.keepDisplayAwakeButton.frame = NSMakeRect(x, 48.0, width, 24.0);
+    self.keepDisplayAwakeButton.frame = NSMakeRect(x, CTDisplayAwakeY, width, CTCheckboxHeight);
 
     [view addSubview:self.keepDisplayAwakeButton];
 
+    self.timeLabel = [NSTextField labelWithString:@""];
+    self.timeLabel.textColor = NSColor.secondaryLabelColor;
+    self.timeLabel.hidden = YES;
+    self.timeLabel.frame = NSMakeRect(x, CTCountdownY, width, CTLabelHeight);
+
+    [view addSubview:self.timeLabel];
+
     self.startStopButton = [NSButton buttonWithTitle:CTTitleStart target:self action:@selector(startStopClicked:)];
     self.startStopButton.bezelStyle = NSBezelStyleRounded;
-    self.startStopButton.frame = NSMakeRect(x, 14.0, 86.0, 30.0);
+    self.startStopButton.frame = NSMakeRect(x, CTStartButtonY, CTStartButtonWidth, CTButtonHeight);
 
     [view addSubview:self.startStopButton];
 
     self.launchAtLoginButton = [NSButton checkboxWithTitle:CTTitleLaunchAtLogin target:self action:@selector(launchAtLoginChanged:)];
-    self.launchAtLoginButton.frame = NSMakeRect(x + 98.0, 18.0, 160.0, 24.0);
+    self.launchAtLoginButton.frame = NSMakeRect(x + CTLaunchAtLoginXOffset, CTLaunchAtLoginY, CTLaunchAtLoginWidth, CTCheckboxHeight);
 
     [view addSubview:self.launchAtLoginButton];
 
     self.errorLabel = [NSTextField labelWithString:@""];
     self.errorLabel.textColor = NSColor.systemRedColor;
     self.errorLabel.hidden = YES;
-    self.errorLabel.frame = NSMakeRect(x, 0.0, width, 16.0);
+    self.errorLabel.frame = NSMakeRect(x, CTErrorY, width, CTLabelHeight);
 
     [view addSubview:self.errorLabel];
 
@@ -134,6 +154,7 @@
     [self.popover showRelativeToRect:button.bounds ofView:button preferredEdge:NSRectEdgeMinY];
     [self.popover.contentViewController.view.window makeFirstResponder:nil];
     [self installOutsideClickMonitor];
+    [self startCountdownTimerIfNeeded];
 }
 
 - (void)showContextMenu {
@@ -161,6 +182,7 @@
 
 - (void)closePopover {
     [self removeOutsideClickMonitor];
+    [self stopCountdownTimer];
     if (!self.popover.shown) { return; }
     [self.popover performClose:nil];
 }
@@ -184,7 +206,7 @@
 
     NSNumber *duration = [self selectedDuration];
     if (!duration && self.indefiniteButton.state != NSControlStateValueOn) {
-        [self showError:@"Duration must be greater than zero."];
+        [self showError:CTErrorDurationInvalid];
         return;
     }
 
@@ -193,7 +215,7 @@
                            keepDisplayAwake:self.keepDisplayAwakeButton.state == NSControlStateValueOn
                                       error:&error];
     if (!ok) {
-        [self showError:error.localizedDescription ?: @"Failed to start."];
+        [self showError:error.localizedDescription ?: CTErrorStartFailed];
         return;
     }
 
@@ -202,10 +224,34 @@
 
 - (NSNumber *)selectedDuration {
     if (self.indefiniteButton.state == NSControlStateValueOn) { return nil; }
-    double value = self.durationField.doubleValue;
-    if (!isfinite(value) || value <= 0.0) { return nil; }
-    NSTimeInterval multiplier = self.unitPopup.indexOfSelectedItem == 0 ? CTSecondsPerHour : CTSecondsPerDay;
-    return @(value * multiplier);
+    NSTimeInterval multiplier = [self durationMultiplierForSelectedUnit];
+    NSInteger maxValue = (NSInteger)floor(CTMaximumFiniteDurationSeconds / multiplier);
+    NSNumber *value = [self positiveIntegerFromString:self.durationField.stringValue maxValue:maxValue];
+    if (!value) { return nil; }
+    return @(value.integerValue * multiplier);
+}
+
+- (NSTimeInterval)durationMultiplierForSelectedUnit {
+    NSInteger selectedIndex = self.unitPopup.indexOfSelectedItem;
+    if (selectedIndex == CTUnitMinutesIndex) { return CTSecondsPerMinute; }
+    if (selectedIndex == CTUnitHoursIndex) { return CTSecondsPerHour; }
+    return CTSecondsPerDay;
+}
+
+- (NSNumber *)positiveIntegerFromString:(NSString *)string maxValue:(NSInteger)maxValue {
+    if (string.length == 0) { return nil; }
+
+    NSInteger value = 0;
+    for (NSUInteger index = 0; index < string.length; index++) {
+        unichar character = [string characterAtIndex:index];
+        if (character < '0' || character > '9') { return nil; }
+
+        value = (value * 10) + (character - '0');
+        if (value > maxValue) { return nil; }
+    }
+
+    if (value < CTMinimumDurationValue) { return nil; }
+    return @(value);
 }
 
 - (void)showError:(NSString *)message {
@@ -215,6 +261,8 @@
 
 - (void)clearError {
     self.errorLabel.stringValue = @"";
+    self.timeLabel.stringValue = @"";
+    self.timeLabel.hidden = YES;
     self.errorLabel.hidden = YES;
 }
 
@@ -228,6 +276,9 @@
     self.keepDisplayAwakeButton.enabled = !active;
     [self syncLaunchAtLoginState];
 
+    [self updateCountdownUI];
+    [self startCountdownTimerIfNeeded];
+
     [self updateStatusIconActive:active];
 }
 
@@ -238,6 +289,65 @@
     self.statusItem.button.title = @"";
 }
 
+- (void)updateCountdownUI {
+    NSDate *endsAt = self.power.endsAt;
+    if (!self.power.active || !endsAt) {
+        [self stopCountdownTimer];
+        self.timeLabel.stringValue = @"";
+        self.timeLabel.hidden = YES;
+        return;
+    }
+
+    NSTimeInterval remaining = [endsAt timeIntervalSinceNow];
+    if (remaining <= 0.0) {
+        self.timeLabel.stringValue = @"";
+        self.timeLabel.hidden = YES;
+        return;
+    }
+
+    if (!self.timeFormatter) {
+        self.timeFormatter = [NSDateFormatter new];
+        self.timeFormatter.timeStyle = NSDateFormatterShortStyle;
+        self.timeFormatter.dateStyle = NSDateFormatterNoStyle;
+    }
+
+    NSString *duration = [self compactDurationStringForInterval:remaining];
+    NSString *time = [self.timeFormatter stringFromDate:endsAt];
+    self.timeLabel.stringValue = [NSString stringWithFormat:CTCountdownFormat, CTCountdownStopsInPrefix, duration, CTCountdownAtSeparator, time];
+    self.timeLabel.hidden = NO;
+}
+
+- (void)startCountdownTimerIfNeeded {
+    if (self.countdownTimer || !self.popover.shown || !self.power.active || !self.power.endsAt) { return; }
+
+    __weak typeof(self) weakSelf = self;
+    self.countdownTimer = [NSTimer scheduledTimerWithTimeInterval:CTCountdownUpdateInterval repeats:YES block:^(NSTimer *timer) {
+        [weakSelf updateCountdownUI];
+    }];
+    self.countdownTimer.tolerance = CTCountdownTimerTolerance;
+}
+
+- (void)stopCountdownTimer {
+    [self.countdownTimer invalidate];
+    self.countdownTimer = nil;
+}
+
+- (NSString *)compactDurationStringForInterval:(NSTimeInterval)interval {
+    NSInteger minutes = (NSInteger)ceil(interval / CTSecondsPerMinute);
+    if (minutes <= 0) { return CTCountdownLessThanMinute; }
+
+    NSInteger days = minutes / (NSInteger)(CTSecondsPerDay / CTSecondsPerMinute);
+    NSInteger hours = (minutes / (NSInteger)(CTSecondsPerHour / CTSecondsPerMinute)) % (NSInteger)(CTSecondsPerDay / CTSecondsPerHour);
+    NSInteger remainingMinutes = minutes % (NSInteger)(CTSecondsPerHour / CTSecondsPerMinute);
+
+    if (days > 0) {
+        return [NSString stringWithFormat:CTDurationDaysHoursFormat, (long)days, (long)hours];
+    }
+    if (hours > 0) {
+        return [NSString stringWithFormat:CTDurationHoursMinutesFormat, (long)hours, (long)remainingMinutes];
+    }
+    return [NSString stringWithFormat:CTDurationMinutesFormat, (long)remainingMinutes];
+}
 - (void)launchAtLoginChanged:(id)sender {
     if (@available(macOS 13.0, *)) {
         NSError *error = nil;
