@@ -9,7 +9,7 @@ User-facing behavior:
 - left-click opens controls
 - right-click shows Quit
 - Start/Stop sleep prevention
-- finite duration in hours/days or true indefinite mode
+- finite duration in minutes/hours/days or true indefinite mode
 - optional display-awake mode
 - no persisted active state after quit/reboot
 
@@ -38,7 +38,7 @@ Key patterns:
 ```text
 Sources/   Objective-C source files
 Scripts/   build/package/run scripts
-*.app/     generated/committed local app bundle artifact
+*.app/     generated local app bundle artifact, ignored by git
 ```
 
 ## Development Commands
