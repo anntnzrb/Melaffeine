@@ -16,19 +16,26 @@ Tiny native macOS menu-bar utility for keeping the Mac awake.
 ## Build
 
 ```sh
-Scripts/package_app.sh
+make
 ```
+
 
 ## Run
 
 ```sh
-open Melaffeine.app
+make run
 ```
 
-Dev loop:
+Open an existing bundle:
 
 ```sh
-Scripts/compile_and_run.sh
+make open
+```
+
+## Test
+
+```sh
+make test
 ```
 
 ## Stack

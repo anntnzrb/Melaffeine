@@ -37,7 +37,7 @@ Key patterns:
 
 ```text
 Sources/   Objective-C source files
-Scripts/   build/package/run scripts
+Tests/     tiny Objective-C test runners
 *.app/     generated local app bundle artifact, ignored by git
 ```
 
@@ -46,13 +46,12 @@ Scripts/   build/package/run scripts
 From repo root:
 
 ```sh
-Scripts/package_app.sh       # build, package, ad-hoc sign Melaffeine.app
-Scripts/compile_and_run.sh   # kill running app, rebuild, launch
-Scripts/launch.sh            # open existing Melaffeine.app
-open Melaffeine.app          # manual launch
+make                         # testable default build/package target
+make test                    # compile and run tiny duration logic tests
+make run                     # build and launch
+make open                    # open existing Melaffeine.app
+make clean                   # remove generated app/test artifacts
 ```
-
-There is no test command currently.
 
 ## Code Conventions & Common Patterns
 
@@ -61,13 +60,15 @@ There is no test command currently.
 - Constants:
   - UI strings: `CTTitleStart`, `CTTitleRunIndefinitely`, etc.
   - layout values: `CTMenuWidth`, `CTMenuPadding`, etc.
-  - time values: `CTSecondsPerMinute`, `CTSecondsPerHour`, `CTSecondsPerDay`.
+  - time values and duration-domain constants: `Duration.h/.m`.
+  - Makefile recipes use POSIX `/bin/sh` and `printf`; do not add Bash-only syntax.
 - State sync:
   - Do not read UI as source of truth except control values at Start time.
   - `PowerController.active` determines Start/Stop and status icon state.
   - Timer expiry must notify UI through `PowerControllerDidChangeNotification`.
   - Finite countdown UI is derived from `PowerController.endsAt`; do not run its UI timer while the popover is closed, inactive, or indefinite.
   - Duration input must parse as strict positive integer text and must not exceed `CTMaximumFiniteDurationSeconds`; do not rely on `NSTextField.doubleValue`.
+  - Duration parsing, unit conversion, and compact countdown formatting belong in `Duration.m`, not `AppDelegate.m`.
 - Error handling:
   - `PowerController` returns `BOOL` + `NSError **` for assertion creation failure.
   - UI displays errors through `errorLabel`.
@@ -81,9 +82,11 @@ There is no test command currently.
 Sources/main.m              app entry point
 Sources/AppDelegate.m       status item, popover UI, launch-at-login, state sync
 Sources/PowerController.m   IOKit assertion lifecycle and timer expiry
+Sources/Duration.m          strict duration parsing/conversion/formatting
 Sources/Constants.m         strings, layout constants, time constants
+Tests/DurationTests.m       tiny no-Xcode duration behavior test runner
+Makefile                    primary build/test/run interface
 project.env                 APP_NAME/BUNDLE_ID/MACOS_MIN_VERSION
-Scripts/package_app.sh      clang build + app bundle + Info.plist + codesign
 README.md                   high-signal user/build notes
 ```
 
@@ -96,17 +99,18 @@ README.md                   high-signal user/build notes
 - No Node/Bun/npm/SwiftPM/Xcode workflow.
 - `project.env` is the script config source of truth.
 
-Current script caveats:
-- `SIGNING_MODE` is declared but signing is hardcoded ad-hoc.
-- Bundle version is hardcoded in `Scripts/package_app.sh` heredoc.
-- Adding/removing `.m` files requires updating the hardcoded clang source list.
-
 ## Testing & QA
 
-There is no automated test suite yet. Required manual/smoke checks after changes:
+Run the tiny automated tests before smoke checks:
 
 ```sh
-Scripts/package_app.sh
+make test
+```
+
+Required manual/smoke checks after changes:
+
+```sh
+make
 open Melaffeine.app
 pgrep -x Melaffeine
 pkill -x Melaffeine
