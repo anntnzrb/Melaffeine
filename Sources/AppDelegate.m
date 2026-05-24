@@ -1,5 +1,6 @@
 #import "AppDelegate.h"
 #import "Constants.h"
+#import "Duration.h"
 #import "PowerController.h"
 #import <ServiceManagement/ServiceManagement.h>
 
@@ -224,34 +225,8 @@
 
 - (NSNumber *)selectedDuration {
     if (self.indefiniteButton.state == NSControlStateValueOn) { return nil; }
-    NSTimeInterval multiplier = [self durationMultiplierForSelectedUnit];
-    NSInteger maxValue = (NSInteger)floor(CTMaximumFiniteDurationSeconds / multiplier);
-    NSNumber *value = [self positiveIntegerFromString:self.durationField.stringValue maxValue:maxValue];
-    if (!value) { return nil; }
-    return @(value.integerValue * multiplier);
-}
-
-- (NSTimeInterval)durationMultiplierForSelectedUnit {
-    NSInteger selectedIndex = self.unitPopup.indexOfSelectedItem;
-    if (selectedIndex == CTUnitMinutesIndex) { return CTSecondsPerMinute; }
-    if (selectedIndex == CTUnitHoursIndex) { return CTSecondsPerHour; }
-    return CTSecondsPerDay;
-}
-
-- (NSNumber *)positiveIntegerFromString:(NSString *)string maxValue:(NSInteger)maxValue {
-    if (string.length == 0) { return nil; }
-
-    NSInteger value = 0;
-    for (NSUInteger index = 0; index < string.length; index++) {
-        unichar character = [string characterAtIndex:index];
-        if (character < '0' || character > '9') { return nil; }
-
-        value = (value * 10) + (character - '0');
-        if (value > maxValue) { return nil; }
-    }
-
-    if (value < CTMinimumDurationValue) { return nil; }
-    return @(value);
+    return CTDurationSecondsFromInputString(self.durationField.stringValue,
+                                            self.unitPopup.indexOfSelectedItem);
 }
 
 - (void)showError:(NSString *)message {
@@ -311,7 +286,7 @@
         self.timeFormatter.dateStyle = NSDateFormatterNoStyle;
     }
 
-    NSString *duration = [self compactDurationStringForInterval:remaining];
+    NSString *duration = CTCompactDurationStringForInterval(remaining);
     NSString *time = [self.timeFormatter stringFromDate:endsAt];
     self.timeLabel.stringValue = [NSString stringWithFormat:CTCountdownFormat, CTCountdownStopsInPrefix, duration, CTCountdownAtSeparator, time];
     self.timeLabel.hidden = NO;
@@ -332,22 +307,6 @@
     self.countdownTimer = nil;
 }
 
-- (NSString *)compactDurationStringForInterval:(NSTimeInterval)interval {
-    NSInteger minutes = (NSInteger)ceil(interval / CTSecondsPerMinute);
-    if (minutes <= 0) { return CTCountdownLessThanMinute; }
-
-    NSInteger days = minutes / (NSInteger)(CTSecondsPerDay / CTSecondsPerMinute);
-    NSInteger hours = (minutes / (NSInteger)(CTSecondsPerHour / CTSecondsPerMinute)) % (NSInteger)(CTSecondsPerDay / CTSecondsPerHour);
-    NSInteger remainingMinutes = minutes % (NSInteger)(CTSecondsPerHour / CTSecondsPerMinute);
-
-    if (days > 0) {
-        return [NSString stringWithFormat:CTDurationDaysHoursFormat, (long)days, (long)hours];
-    }
-    if (hours > 0) {
-        return [NSString stringWithFormat:CTDurationHoursMinutesFormat, (long)hours, (long)remainingMinutes];
-    }
-    return [NSString stringWithFormat:CTDurationMinutesFormat, (long)remainingMinutes];
-}
 - (void)launchAtLoginChanged:(id)sender {
     if (@available(macOS 13.0, *)) {
         NSError *error = nil;
