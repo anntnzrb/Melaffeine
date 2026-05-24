@@ -13,63 +13,17 @@ Tiny native macOS menu-bar utility for keeping the Mac awake.
 - No persisted active state after reboot/relaunch.
 - No Dock icon.
 
-## Dev shell
+## Dev Shell
 
 ```sh
 nix develop
 ```
-
-Provides `just`, `clang`, and `clang-tools`. Run `just` commands inside that environment; `justfile` intentionally does not invoke `nix` and auto-loads `project.env` for app metadata.
 
 ## Build
 
 ```sh
 just build
 ```
-
-
-## Nix package
-
-```sh
-nix build .#melaffeine
-```
-
-The default package is also `melaffeine`:
-
-```sh
-nix build
-```
-
-## Run
-
-```sh
-just run
-```
-
-Open an existing bundle:
-
-```sh
-just open
-```
-
-## Clean
-
-```sh
-just clean
-```
-
-## Test
-
-```sh
-just test
-```
-
-## Check
-
-```sh
-just check
-```
-
 ## Stack
 
 - Objective-C
