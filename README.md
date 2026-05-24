@@ -13,29 +13,63 @@ Tiny native macOS menu-bar utility for keeping the Mac awake.
 - No persisted active state after reboot/relaunch.
 - No Dock icon.
 
+## Dev shell
+
+```sh
+nix develop
+```
+
+Provides `just`, `clang`, and `clang-tools`.
+Nix flake internals live in `nix/flake/`; `flake.nix` is intentionally only the thin output orchestrator.
+Run `just` commands inside that environment; `justfile` intentionally does not invoke `nix`.
+
 ## Build
 
 ```sh
-make
+just build
 ```
 
+
+## Nix package
+
+```sh
+nix build .#melaffeine
+```
+
+The default package is also `melaffeine`:
+
+```sh
+nix build
+```
 
 ## Run
 
 ```sh
-make run
+just run
 ```
 
 Open an existing bundle:
 
 ```sh
-make open
+just open
+```
+
+## Clean
+
+```sh
+just clean
 ```
 
 ## Test
 
 ```sh
-make test
+just test
+```
+
+## Check
+
+```sh
+just check
 ```
 
 ## Stack

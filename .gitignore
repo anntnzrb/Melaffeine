@@ -5,6 +5,7 @@ DerivedData/
 build/
 .build/
 Tests/DurationTests
+result
 
 # macOS metadata
 .DS_Store

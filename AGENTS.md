@@ -46,11 +46,13 @@ Tests/     tiny Objective-C test runners
 From repo root:
 
 ```sh
-make                         # testable default build/package target
-make test                    # compile and run tiny duration logic tests
-make run                     # build and launch
-make open                    # open existing Melaffeine.app
-make clean                   # remove generated app/test artifacts
+just build                   # build/package app bundle
+just test                    # compile and run tiny duration logic tests
+just run                     # build and launch
+just open                    # open existing Melaffeine.app
+just clean                   # remove generated app/test artifacts
+nix develop                  # enter pinned dev shell with just/clang tools
+nix build                    # build default Nix package: melaffeine
 ```
 
 ## Code Conventions & Common Patterns
@@ -61,7 +63,9 @@ make clean                   # remove generated app/test artifacts
   - UI strings: `CTTitleStart`, `CTTitleRunIndefinitely`, etc.
   - layout values: `CTMenuWidth`, `CTMenuPadding`, etc.
   - time values and duration-domain constants: `Duration.h/.m`.
-  - Makefile recipes use POSIX `/bin/sh` and `printf`; do not add Bash-only syntax.
+  - `justfile` recipes use POSIX `/bin/sh` and `printf`; do not add Bash-only syntax.
+  - `justfile` intentionally must not invoke `nix`; enter `nix develop` first when reproducible tooling is needed.
+  - Source autodiscovery convention: app `.m` files live in `Sources/`, tests live in `Tests/`; do not put scratch `.m` files in `Sources/`.
 - State sync:
   - Do not read UI as source of truth except control values at Start time.
   - `PowerController.active` determines Start/Stop and status icon state.
@@ -85,7 +89,10 @@ Sources/PowerController.m   IOKit assertion lifecycle and timer expiry
 Sources/Duration.m          strict duration parsing/conversion/formatting
 Sources/Constants.m         strings, layout constants, time constants
 Tests/DurationTests.m       tiny no-Xcode duration behavior test runner
-Makefile                    primary build/test/run interface
+justfile                    primary command runner
+flake.nix                   pinned Nix dev shell
+nix/flake/                  modular package/devShell/formatter definitions
+flake.lock                  pinned Nix input lock
 project.env                 APP_NAME/BUNDLE_ID/MACOS_MIN_VERSION
 README.md                   high-signal user/build notes
 ```
@@ -93,24 +100,25 @@ README.md                   high-signal user/build notes
 ## Runtime/Tooling Preferences
 
 - Required platform: macOS 14+ currently configured.
-- Required compiler/tooling: Apple Command Line Tools with `clang`, `codesign`, `open`.
+- Required compiler/tooling: Apple Command Line Tools with `codesign` and `open`; `nix develop` provides reproducible `just`, `clang`, and `clang-tools`.
 - Build links frameworks: `Cocoa`, `IOKit`, `ServiceManagement`.
 - Signing is local ad-hoc only.
 - No Node/Bun/npm/SwiftPM/Xcode workflow.
 - `project.env` is the script config source of truth.
+- Default Nix package is `packages.<system>.melaffeine`, installed under `$out/Applications/Melaffeine.app`; Nix builds skip host `xattr`/`codesign` by overriding `just` variables.
 
 ## Testing & QA
 
 Run the tiny automated tests before smoke checks:
 
 ```sh
-make test
+just test
 ```
 
 Required manual/smoke checks after changes:
 
 ```sh
-make
+just build
 open Melaffeine.app
 pgrep -x Melaffeine
 pkill -x Melaffeine
