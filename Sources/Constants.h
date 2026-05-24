@@ -1,26 +1,26 @@
 #import <Foundation/Foundation.h>
 
-FOUNDATION_EXPORT NSString * const CTAppName;
-FOUNDATION_EXPORT NSString * const CTBundleIdentifier;
-FOUNDATION_EXPORT NSString * const CTIconInactive;
-FOUNDATION_EXPORT NSString * const CTIconActive;
-FOUNDATION_EXPORT NSString * const CTTitleStart;
-FOUNDATION_EXPORT NSString * const CTTitleStop;
-FOUNDATION_EXPORT NSString * const CTTitleQuit;
-FOUNDATION_EXPORT NSString * const CTTitleRunIndefinitely;
-FOUNDATION_EXPORT NSString * const CTTitleKeepDisplayAwake;
-FOUNDATION_EXPORT NSString * const CTTitleLaunchAtLogin;
-FOUNDATION_EXPORT NSString * const CTDurationPlaceholder;
-FOUNDATION_EXPORT NSString * const CTDefaultDurationText;
-FOUNDATION_EXPORT NSString * const CTUnitMinutesTitle;
-FOUNDATION_EXPORT NSString * const CTUnitHoursTitle;
-FOUNDATION_EXPORT NSString * const CTUnitDaysTitle;
-FOUNDATION_EXPORT NSString * const CTErrorDurationInvalid;
-FOUNDATION_EXPORT NSString * const CTErrorStartFailed;
-FOUNDATION_EXPORT NSString * const CTCountdownStopsInPrefix;
-FOUNDATION_EXPORT NSString * const CTCountdownAtSeparator;
-FOUNDATION_EXPORT NSString * const CTCountdownFormat;
-FOUNDATION_EXPORT NSString * const CTIntegerFormat;
+FOUNDATION_EXPORT NSString *const CTAppName;
+FOUNDATION_EXPORT NSString *const CTBundleIdentifier;
+FOUNDATION_EXPORT NSString *const CTIconInactive;
+FOUNDATION_EXPORT NSString *const CTIconActive;
+FOUNDATION_EXPORT NSString *const CTTitleStart;
+FOUNDATION_EXPORT NSString *const CTTitleStop;
+FOUNDATION_EXPORT NSString *const CTTitleQuit;
+FOUNDATION_EXPORT NSString *const CTTitleRunIndefinitely;
+FOUNDATION_EXPORT NSString *const CTTitleKeepDisplayAwake;
+FOUNDATION_EXPORT NSString *const CTTitleLaunchAtLogin;
+FOUNDATION_EXPORT NSString *const CTDurationPlaceholder;
+FOUNDATION_EXPORT NSString *const CTDefaultDurationText;
+FOUNDATION_EXPORT NSString *const CTUnitMinutesTitle;
+FOUNDATION_EXPORT NSString *const CTUnitHoursTitle;
+FOUNDATION_EXPORT NSString *const CTUnitDaysTitle;
+FOUNDATION_EXPORT NSString *const CTErrorDurationInvalid;
+FOUNDATION_EXPORT NSString *const CTErrorStartFailed;
+FOUNDATION_EXPORT NSString *const CTCountdownStopsInPrefix;
+FOUNDATION_EXPORT NSString *const CTCountdownAtSeparator;
+FOUNDATION_EXPORT NSString *const CTCountdownFormat;
+FOUNDATION_EXPORT NSString *const CTIntegerFormat;
 
 FOUNDATION_EXPORT const CGFloat CTMenuWidth;
 FOUNDATION_EXPORT const CGFloat CTMenuPadding;

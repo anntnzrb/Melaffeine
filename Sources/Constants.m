@@ -1,26 +1,27 @@
 #import "Constants.h"
 
-NSString * const CTAppName = @"Melaffeine";
-NSString * const CTBundleIdentifier = @"dev.annt.melaffeine";
-NSString * const CTIconInactive = @"cup.and.saucer";
-NSString * const CTIconActive = @"cup.and.saucer.fill";
-NSString * const CTTitleStart = @"Start";
-NSString * const CTTitleStop = @"Stop";
-NSString * const CTTitleQuit = @"Quit";
-NSString * const CTTitleRunIndefinitely = @"Run indefinitely";
-NSString * const CTTitleKeepDisplayAwake = @"Keep display awake too";
-NSString * const CTTitleLaunchAtLogin = @"Launch at login";
-NSString * const CTDurationPlaceholder = @"Duration";
-NSString * const CTDefaultDurationText = @"2";
-NSString * const CTUnitMinutesTitle = @"Minutes";
-NSString * const CTUnitHoursTitle = @"Hours";
-NSString * const CTUnitDaysTitle = @"Days";
-NSString * const CTErrorDurationInvalid = @"Enter a whole number from 1 to 365 days.";
-NSString * const CTErrorStartFailed = @"Failed to start.";
-NSString * const CTCountdownStopsInPrefix = @"Stops in ";
-NSString * const CTCountdownAtSeparator = @" at ";
-NSString * const CTCountdownFormat = @"%@%@%@%@";
-NSString * const CTIntegerFormat = @"#";
+NSString *const CTAppName = @"Melaffeine";
+NSString *const CTBundleIdentifier = @"dev.annt.melaffeine";
+NSString *const CTIconInactive = @"cup.and.saucer";
+NSString *const CTIconActive = @"cup.and.saucer.fill";
+NSString *const CTTitleStart = @"Start";
+NSString *const CTTitleStop = @"Stop";
+NSString *const CTTitleQuit = @"Quit";
+NSString *const CTTitleRunIndefinitely = @"Run indefinitely";
+NSString *const CTTitleKeepDisplayAwake = @"Keep display awake too";
+NSString *const CTTitleLaunchAtLogin = @"Launch at login";
+NSString *const CTDurationPlaceholder = @"Duration";
+NSString *const CTDefaultDurationText = @"2";
+NSString *const CTUnitMinutesTitle = @"Minutes";
+NSString *const CTUnitHoursTitle = @"Hours";
+NSString *const CTUnitDaysTitle = @"Days";
+NSString *const CTErrorDurationInvalid =
+    @"Enter a whole number from 1 to 365 days.";
+NSString *const CTErrorStartFailed = @"Failed to start.";
+NSString *const CTCountdownStopsInPrefix = @"Stops in ";
+NSString *const CTCountdownAtSeparator = @" at ";
+NSString *const CTCountdownFormat = @"%@%@%@%@";
+NSString *const CTIntegerFormat = @"#";
 
 const CGFloat CTMenuWidth = 260.0;
 const CGFloat CTMenuPadding = 16.0;
