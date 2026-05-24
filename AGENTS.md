@@ -100,7 +100,7 @@ README.md                   high-signal user/build notes
 ## Runtime/Tooling Preferences
 
 - Required platform: macOS 14+ currently configured.
-- Required compiler/tooling: Apple Command Line Tools with `codesign` and `open`; `nix develop` provides reproducible `just`, `clang`, and `clang-tools`.
+- Required compiler/tooling: Apple Command Line Tools with `codesign` and `open`; `nix develop` provides reproducible `just`, `clang`, and `clang-tools`, and `justfile` auto-loads `project.env`.
 - Build links frameworks: `Cocoa`, `IOKit`, `ServiceManagement`.
 - Signing is local ad-hoc only.
 - No Node/Bun/npm/SwiftPM/Xcode workflow.

@@ -1,14 +1,16 @@
-set shell := ["sh", "-cu"]
+set dotenv-path := "project.env"
 
-app := "Melaffeine.app"
-app_name := "Melaffeine"
+set shell := ["sh", "-cu"]
+app_name := env("APP_NAME", "Melaffeine")
+bundle_id := env("BUNDLE_ID", "dev.annt.melaffeine")
+app := app_name + ".app"
 bin := app + "/Contents/MacOS/" + app_name
 plist := app + "/Contents/Info.plist"
 test_bin := "Tests/DurationTests"
 
 version := "0.1.0"
 build_number := "1"
-macos_min_version := "14.0"
+macos_min_version := env("MACOS_MIN_VERSION", "14.0")
 
 objcflags := "-Os -fobjc-arc -mmacosx-version-min=" + macos_min_version
 warnflags := "-Wall -Wextra -Werror"
@@ -33,7 +35,7 @@ build:
       '<dict>' \
       '    <key>CFBundleName</key><string>{{ app_name }}</string>' \
       '    <key>CFBundleDisplayName</key><string>{{ app_name }}</string>' \
-      '    <key>CFBundleIdentifier</key><string>dev.annt.melaffeine</string>' \
+      '    <key>CFBundleIdentifier</key><string>{{ bundle_id }}</string>' \
       '    <key>CFBundleExecutable</key><string>{{ app_name }}</string>' \
       '    <key>CFBundlePackageType</key><string>APPL</string>' \
       '    <key>CFBundleShortVersionString</key><string>{{ version }}</string>' \

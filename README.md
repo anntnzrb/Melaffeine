@@ -19,9 +19,7 @@ Tiny native macOS menu-bar utility for keeping the Mac awake.
 nix develop
 ```
 
-Provides `just`, `clang`, and `clang-tools`.
-Nix flake internals live in `nix/flake/`; `flake.nix` is intentionally only the thin output orchestrator.
-Run `just` commands inside that environment; `justfile` intentionally does not invoke `nix`.
+Provides `just`, `clang`, and `clang-tools`. Run `just` commands inside that environment; `justfile` intentionally does not invoke `nix` and auto-loads `project.env` for app metadata.
 
 ## Build
 
