@@ -292,25 +292,24 @@ mod tests {
 
     #[test]
     fn unit_test_build_content_view() {
-        if let Some(mtm) = MainThreadMarker::new() {
-            let controls = build_content_view(mtm);
-            assert_eq!(
-                controls.indefinite_button.title().to_string(),
-                TITLE_RUN_INDEFINITELY
-            );
-            assert_eq!(controls.start_stop_button.title().to_string(), TITLE_START);
-            assert_eq!(
-                controls.keep_display_awake_button.title().to_string(),
-                TITLE_KEEP_DISPLAY_AWAKE
-            );
-            assert_eq!(
-                controls.launch_at_login_button.title().to_string(),
-                TITLE_LAUNCH_AT_LOGIN
-            );
-            assert_eq!(
-                controls.duration_field.stringValue().to_string(),
-                DEFAULT_DURATION_TEXT
-            );
-        }
+        let mtm = unsafe { MainThreadMarker::new_unchecked() };
+        let controls = build_content_view(mtm);
+        assert_eq!(
+            controls.indefinite_button.title().to_string(),
+            TITLE_RUN_INDEFINITELY
+        );
+        assert_eq!(controls.start_stop_button.title().to_string(), TITLE_START);
+        assert_eq!(
+            controls.keep_display_awake_button.title().to_string(),
+            TITLE_KEEP_DISPLAY_AWAKE
+        );
+        assert_eq!(
+            controls.launch_at_login_button.title().to_string(),
+            TITLE_LAUNCH_AT_LOGIN
+        );
+        assert_eq!(
+            controls.duration_field.stringValue().to_string(),
+            DEFAULT_DURATION_TEXT
+        );
     }
 }

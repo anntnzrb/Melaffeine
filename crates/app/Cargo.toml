@@ -51,3 +51,7 @@ objc2-core-foundation = { workspace = true, features = ["CFString"] }
 
 [lints]
 workspace = true
+
+[[test]]
+name = "main_thread_app"
+harness = false
