@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Nix Flake & Workspace Check (Apple Silicon)
+    runs-on: macos-14
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Magic Nix Cache
+        uses: DeterminateSystems/magic-nix-cache-action@main
+
+      - name: Nix Flake Checks
+        run: nix flake check
+
+      - name: Workspace Cargo & Formatting Checks
+        run: nix develop --command just check
+
+      - name: Build Default Package (Melaffeine.app)
+        run: nix build .#default
+
+      - name: Build CLI Package (melaffeine)
+        run: nix build .#cli

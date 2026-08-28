@@ -1,0 +1,44 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    name: Build & Release Apple Silicon Binaries
+    runs-on: macos-14
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Magic Nix Cache
+        uses: DeterminateSystems/magic-nix-cache-action@main
+
+      - name: Build Melaffeine.app and CLI via Nix
+        run: |
+          nix build .#default
+          nix build .#cli
+
+          mkdir -p release-artifacts
+          # Package App bundle into zip
+          ditto -c -k --keepParent result/Applications/Melaffeine.app release-artifacts/Melaffeine-aarch64-apple-darwin.zip
+          # Copy standalone CLI binary
+          cp result-1/bin/melaffeine release-artifacts/melaffeine-cli-aarch64-apple-darwin
+          chmod +x release-artifacts/melaffeine-cli-aarch64-apple-darwin
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release-artifacts/Melaffeine-aarch64-apple-darwin.zip
+            release-artifacts/melaffeine-cli-aarch64-apple-darwin
+          generate_release_notes: true
