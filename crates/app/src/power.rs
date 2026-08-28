@@ -198,8 +198,10 @@ mod tests {
         assert!(controller.keep_display_awake());
         assert_eq!(controller.started_at(), Some(now));
         assert_eq!(controller.ends_at(), Some(now + dur));
+        assert_eq!(controller.started_at(), Some(now));
         let active_dbg = format!("{controller:?}");
         assert!(active_dbg.contains("PowerController"));
+        assert!(active_dbg.contains("is_active: true"));
         assert!(controller.start(None, false, now).is_ok());
         assert_eq!(drop_count.load(Ordering::SeqCst), 1);
         assert!(controller.is_active());
@@ -239,7 +241,16 @@ mod tests {
         assert!(!controller.keep_display_awake());
         assert_eq!(controller.started_at(), None);
         assert_eq!(controller.ends_at(), None);
-        controller.stop();
+        let now = SystemTime::now();
+        if controller
+            .start(Some(Duration::from_secs(60)), true, now)
+            .is_ok()
+        {
+            let active_dbg = format!("{controller:?}");
+            assert!(active_dbg.contains("PowerController"));
+            assert_eq!(controller.started_at(), Some(now));
+            controller.stop();
+        }
     }
 
     #[test]

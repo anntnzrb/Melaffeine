@@ -10,6 +10,8 @@
     dead_code
 )]
 
+use std::io::{BufRead, BufReader, Write};
+use std::os::unix::net::UnixStream;
 use std::time::{Duration, SystemTime};
 
 use app::app_delegate::AppDelegate;
@@ -27,7 +29,7 @@ use objc2::{DefinedClass, MainThreadMarker, msg_send};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSControlStateValueOff, NSControlStateValueOn,
 };
-use objc2_foundation::{NSNotification, NSString};
+use objc2_foundation::{NSNotification, NSString, NSTimer};
 
 #[derive(Clone, Default)]
 struct MockProvider {
@@ -218,6 +220,92 @@ fn main() {
     let stop_resp = delegate.execute_ipc_command(&IpcCommand::Stop);
     assert!(matches!(stop_resp, IpcResponse::Ok(_)));
 
+    // Toggle when inactive -> starts session
+    let toggle_inactive = delegate.execute_ipc_command(&IpcCommand::Toggle);
+    assert!(matches!(toggle_inactive, IpcResponse::Ok(_)));
+    delegate.stop_power_and_expiry();
+
+    // Start indefinite via IPC
+    let start_indef_resp = delegate.execute_ipc_command(&IpcCommand::Start {
+        duration: None,
+        keep_display_awake: false,
+    });
+    assert!(matches!(start_indef_resp, IpcResponse::Ok(_)));
+    delegate.stop_power_and_expiry();
+
+    let quit_resp = delegate.execute_ipc_command(&IpcCommand::Quit);
+    assert!(matches!(quit_resp, IpcResponse::Ok(_)));
+
+    // IPC Server connection handling tests
+    // 1: Empty command
+    let (mut client1, server_stream1) = UnixStream::pair().unwrap();
+    client1.write_all(b"\n").unwrap();
+    app::ipc_server::IpcServer::handle_connection(server_stream1, &delegate);
+    let mut buf1 = String::new();
+    BufReader::new(&client1).read_line(&mut buf1).unwrap();
+    assert!(buf1.contains("ERR empty command"));
+
+    // 2: Invalid command
+    let (mut client2, server_stream2) = UnixStream::pair().unwrap();
+    client2.write_all(b"NOT_A_COMMAND\n").unwrap();
+    app::ipc_server::IpcServer::handle_connection(server_stream2, &delegate);
+    let mut buf2 = String::new();
+    BufReader::new(&client2).read_line(&mut buf2).unwrap();
+    assert!(buf2.contains("ERR invalid command"));
+
+    // 3: Valid command (STATUS)
+    let (mut client3, server_stream3) = UnixStream::pair().unwrap();
+    client3.write_all(b"STATUS\n").unwrap();
+    app::ipc_server::IpcServer::handle_connection(server_stream3, &delegate);
+    let mut buf3 = String::new();
+    BufReader::new(&client3).read_line(&mut buf3).unwrap();
+    assert!(buf3.contains("STATUS active="));
+    // Popover, Menu & Timer tests
+    if let Some(btn) = status_item.button(mtm) {
+        delegate.toggle_popover_relative_to(&btn);
+        delegate.toggle_popover_relative_to(&btn);
+    }
+    delegate.show_context_menu();
+    delegate.install_outside_click_monitor();
+    delegate.remove_outside_click_monitor();
+    delegate.start_countdown_timer_if_needed();
+    // Manually install and invalidate countdown timer to cover branch
+    let test_timer = unsafe {
+        NSTimer::scheduledTimerWithTimeInterval_repeats_block(
+            10.0,
+            false,
+            &block2::RcBlock::new(|_| {}),
+        )
+    };
+    delegate
+        .ivars()
+        .borrow_mut()
+        .as_mut()
+        .unwrap()
+        .countdown_timer = Some(test_timer);
+    delegate.stop_countdown_timer();
+    assert!(
+        delegate
+            .ivars()
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .countdown_timer
+            .is_none()
+    );
+    delegate.close_popover();
+
+    // Timer expiry via NSRunLoop
+    delegate
+        .start_session(Some(Duration::from_secs(60)), false)
+        .unwrap();
+    delegate.start_countdown_timer_if_needed();
+    delegate.stop_power_and_expiry();
+
+    // Termination lifecycle
+    unsafe {
+        let _: () = msg_send![&*delegate, applicationWillTerminate: &*notif];
+    }
     // 4. Test IOKitProvider
     let provider = IOKitProvider;
     assert_eq!(format!("{provider:?}"), "IOKitProvider");

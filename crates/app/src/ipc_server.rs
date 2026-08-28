@@ -65,7 +65,7 @@ impl IpcServer {
         })
     }
 
-    fn handle_connection(mut stream: UnixStream, delegate: &AppDelegate) {
+    pub fn handle_connection(mut stream: UnixStream, delegate: &AppDelegate) {
         let _ = stream.set_nonblocking(false);
         let mut reader = BufReader::new(&stream);
         let mut line = String::new();

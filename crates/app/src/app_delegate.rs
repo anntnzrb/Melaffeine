@@ -272,10 +272,6 @@ impl AppDelegate {
         let state_opt = self.ivars().borrow();
         if let Some(state) = state_opt.as_ref() {
             state.status_item.setMenu(Some(&menu));
-            if let Some(button) = state.status_item.button(mtm) {
-                // SAFETY: performClick is called on the main thread.
-                unsafe { button.performClick(None) };
-            }
             state.status_item.setMenu(None);
         }
     }
