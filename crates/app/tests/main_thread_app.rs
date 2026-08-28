@@ -14,12 +14,11 @@ use std::time::{Duration, SystemTime};
 
 use app::app_delegate::AppDelegate;
 use app::iokit::IOKitProvider;
-use app::login::LoginItemService;
 use app::power::{AssertionKind, AssertionProvider, PowerController, PowerError};
 use app::ui::{
-    DEFAULT_DURATION_TEXT, TITLE_KEEP_DISPLAY_AWAKE, TITLE_LAUNCH_AT_LOGIN, TITLE_RUN_INDEFINITELY,
-    TITLE_START, TITLE_STOP, UNIT_DAYS_INDEX, UNIT_HOURS_INDEX, UNIT_MINUTES_INDEX,
-    build_content_view, compute_ui_projection,
+    DEFAULT_DURATION_TEXT, TITLE_KEEP_DISPLAY_AWAKE, TITLE_RUN_INDEFINITELY, TITLE_START,
+    TITLE_STOP, UNIT_DAYS_INDEX, UNIT_HOURS_INDEX, UNIT_MINUTES_INDEX, build_content_view,
+    compute_ui_projection,
 };
 use app_core::duration::{DurationUnit, format_compact_duration, parse_duration};
 use objc2::runtime::ProtocolObject;
@@ -75,10 +74,6 @@ fn main() {
         TITLE_KEEP_DISPLAY_AWAKE
     );
     assert_eq!(
-        controls.launch_at_login_button.title().to_string(),
-        TITLE_LAUNCH_AT_LOGIN
-    );
-    assert_eq!(
         controls.duration_field.stringValue().to_string(),
         DEFAULT_DURATION_TEXT
     );
@@ -107,7 +102,6 @@ fn main() {
     let display_awake_button = state.display_awake_button.clone();
     let unit_popup = state.unit_popup.clone();
     let start_stop_button = state.start_stop_button.clone();
-    let launch_at_login_button = state.launch_at_login_button.clone();
     let status_item = state.status_item.clone();
     drop(state_opt);
 
@@ -172,11 +166,6 @@ fn main() {
     delegate.handle_start_stop();
     delegate.stop_power_and_expiry();
 
-    // Launch at login handler via msg_send (safe unregister/noop path only)
-    launch_at_login_button.setState(NSControlStateValueOff);
-    unsafe {
-        let _: () = msg_send![&*delegate, launchAtLoginChanged: &*launch_at_login_button];
-    }
 
     // Popover toggle
     if let Some(button) = status_item.button(mtm) {
@@ -197,10 +186,6 @@ fn main() {
     delegate.install_outside_click_monitor();
     delegate.remove_outside_click_monitor();
     delegate.teardown();
-
-    // 3. Test LoginItemService
-    let _ = LoginItemService::is_enabled();
-    let _ = LoginItemService::set_enabled(false);
 
     // 4. Test IOKitProvider
     let provider = IOKitProvider;

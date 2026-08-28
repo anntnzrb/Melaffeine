@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Melaffeine is a tiny native macOS menu-bar utility that prevents sleep using native IOKit power assertions. It is implemented in 100% Rust (Rust 2024 edition) using modern `objc2` bindings for AppKit, IOKit, and ServiceManagement. It contains no Objective-C, Swift, SwiftUI, or Xcode project files.
+Melaffeine is a tiny native macOS menu-bar utility that prevents sleep using native IOKit power assertions. It is implemented in 100% Rust (Rust 2024 edition) using modern `objc2` bindings for AppKit and IOKit. It contains no Objective-C, Swift, SwiftUI, or Xcode project files.
 
 User-facing behavior:
 - icon-only menu-bar app, no Dock icon (`LSUIElement = true` / `NSApplicationActivationPolicyAccessory`)
@@ -11,14 +11,12 @@ User-facing behavior:
 - Start/Stop sleep prevention
 - finite duration in minutes/hours/days or true indefinite mode
 - optional display-awake mode
-- launch at login support via `SMAppService`
 - no persisted active state after quit/reboot
 
 ## Architecture & Data Flow
-
 Melaffeine is structured as a two-crate Cargo workspace:
 - `crates/app-core`: Pure domain logic with `#![forbid(unsafe_code)]`. Contains duration parsing (`DurationUnit`, `parse_duration`) and compact minute formatting (`format_compact_duration`).
-- `crates/app`: Native macOS AppKit application binary (`Melaffeine`). Contains the `NSApplicationDelegate` lifecycle, UI view construction, `UiProjection` state modeling, `PowerController` assertion management, and Apple framework adapters (`IOKitProvider` and `SMAppService`).
+- `crates/app`: Native macOS AppKit application binary (`Melaffeine`). Contains the `NSApplicationDelegate` lifecycle, UI view construction, `UiProjection` state modeling, `PowerController` assertion management, and Apple framework adapters (`IOKitProvider`).
 
 High-level flow:
 
@@ -69,8 +67,7 @@ just clean                   # remove target, result, and generated bundle artif
 
 - Rust 2024 edition, workspace resolver 2.
 - Strict lints: workspace-level `rust.lints` and `clippy.lints` with warnings denied in CI/checks; test exemptions configured in `clippy.toml`.
-- Objective-C Runtime bindings:
-  - Modern `objc2` ecosystem (`objc2`, `objc2-foundation`, `objc2-app-kit`, `objc2-io-kit`, `objc2-service-management`, `objc2-core-foundation`).
+  - Modern `objc2` ecosystem (`objc2`, `objc2-foundation`, `objc2-app-kit`, `objc2-io-kit`, `objc2-core-foundation`).
   - Do not introduce obsolete crates (`cocoa`, `objc`, `objc-foundation`, `objc-id`, `io-kit-sys`).
   - Use `MainThreadMarker` / `MainThreadOnly` for all AppKit UI interactions.
   - Retain cycles prevented via `Weak` delegate references in event monitor / timer block callbacks.
@@ -99,8 +96,6 @@ crates/app/src/main.rs                   App entry point & NSApplication bootstr
 crates/app/src/app_delegate.rs           NSApplicationDelegate & AppKit lifecycle
 crates/app/src/ui.rs                     Popover UI layout & UiProjection
 crates/app/src/power.rs                  PowerController & assertion session model
-crates/app/src/iokit.rs                  IOKit IOPMAssertion adapter
-crates/app/src/login.rs                  SMAppService login item adapter
 Resources/Info.plist                     Bundle Info.plist definition
 justfile                                 Primary command runner (POSIX /bin/sh)
 flake.nix                                Pinned Nix flake using flake-parts, crane, fenix
@@ -143,6 +138,4 @@ Functional QA checklist:
 - finite duration auto-stops and UI/icon sync back to off
 - finite active session shows remaining time and stop clock time in the popover
 - finite duration accepts minutes/hours/days, rejects zero, negative, non-numeric, decimal, and excessive values (>365 days)
-- indefinite mode does not persist across relaunch
-- Launch at Login checkbox reflects `SMAppService` state
 - `pmset -g assertions` confirms `PreventUserIdleSystemSleep` / `PreventUserIdleDisplaySleep`

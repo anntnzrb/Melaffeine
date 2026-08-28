@@ -23,12 +23,9 @@ pub const UNIT_POPUP_Y: f64 = 100.0;
 pub const DISPLAY_AWAKE_Y: f64 = 72.0;
 pub const COUNTDOWN_Y: f64 = 48.0;
 pub const START_BUTTON_Y: f64 = 14.0;
-pub const LAUNCH_AT_LOGIN_Y: f64 = 18.0;
 pub const ERROR_Y: f64 = 0.0;
 pub const UNIT_POPUP_WIDTH: f64 = 116.0;
-pub const START_BUTTON_WIDTH: f64 = 86.0;
-pub const LAUNCH_AT_LOGIN_X_OFFSET: f64 = 98.0;
-pub const LAUNCH_AT_LOGIN_WIDTH: f64 = 160.0;
+pub const START_BUTTON_WIDTH: f64 = 228.0;
 pub const COUNTDOWN_UPDATE_INTERVAL: f64 = 60.0;
 pub const COUNTDOWN_TIMER_TOLERANCE: f64 = 15.0;
 
@@ -40,7 +37,6 @@ pub const TITLE_STOP: &str = "Stop";
 pub const TITLE_QUIT: &str = "Quit";
 pub const TITLE_RUN_INDEFINITELY: &str = "Run indefinitely";
 pub const TITLE_KEEP_DISPLAY_AWAKE: &str = "Keep display awake too";
-pub const TITLE_LAUNCH_AT_LOGIN: &str = "Launch at login";
 pub const DURATION_PLACEHOLDER: &str = "Duration";
 pub const DEFAULT_DURATION_TEXT: &str = "2";
 pub const UNIT_MINUTES_TITLE: &str = "Minutes";
@@ -123,8 +119,6 @@ pub struct PopoverControls {
     pub time_label: Retained<NSTextField>,
     /// Primary Start / Stop action button.
     pub start_stop_button: Retained<NSButton>,
-    /// "Launch at login" checkbox.
-    pub launch_at_login_button: Retained<NSButton>,
     /// Error message label.
     pub error_label: Retained<NSTextField>,
 }
@@ -217,24 +211,7 @@ pub fn build_content_view(mtm: MainThreadMarker) -> PopoverControls {
         CGSize::new(START_BUTTON_WIDTH, BUTTON_HEIGHT),
     ));
     view.addSubview(&start_stop_button);
-
-    // 7. Launch at login checkbox
-    // SAFETY: checkboxWithTitle_target_action is called on the main thread.
-    let launch_at_login_button = unsafe {
-        NSButton::checkboxWithTitle_target_action(
-            &NSString::from_str(TITLE_LAUNCH_AT_LOGIN),
-            None,
-            None,
-            mtm,
-        )
-    };
-    launch_at_login_button.setFrame(CGRect::new(
-        CGPoint::new(x + LAUNCH_AT_LOGIN_X_OFFSET, LAUNCH_AT_LOGIN_Y),
-        CGSize::new(LAUNCH_AT_LOGIN_WIDTH, CHECKBOX_HEIGHT),
-    ));
-    view.addSubview(&launch_at_login_button);
-
-    // 8. Error label
+    // 7. Error label
     let error_label = NSTextField::labelWithString(&NSString::from_str(""), mtm);
     error_label.setTextColor(Some(&NSColor::systemRedColor()));
     error_label.setHidden(true);
@@ -252,7 +229,6 @@ pub fn build_content_view(mtm: MainThreadMarker) -> PopoverControls {
         keep_display_awake_button,
         time_label,
         start_stop_button,
-        launch_at_login_button,
         error_label,
     }
 }
@@ -302,10 +278,6 @@ mod tests {
         assert_eq!(
             controls.keep_display_awake_button.title().to_string(),
             TITLE_KEEP_DISPLAY_AWAKE
-        );
-        assert_eq!(
-            controls.launch_at_login_button.title().to_string(),
-            TITLE_LAUNCH_AT_LOGIN
         );
         assert_eq!(
             controls.duration_field.stringValue().to_string(),

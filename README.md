@@ -10,7 +10,6 @@ Tiny native macOS menu-bar utility for keeping the Mac awake.
 - Duration: minutes, hours, days, or indefinite.
 - Finite sessions show remaining time and stop clock time in the popover.
 - Optional: keep display awake too.
-- Launch at login support via `SMAppService`.
 - No persisted active state after reboot/relaunch.
 - No Dock icon.
 
@@ -34,6 +33,5 @@ nix build                        # build macOS app bundle via Nix & Crane
 
 - Rust 2024
 - AppKit `NSStatusItem` / `NSPopover` via `objc2`
-- IOKit `IOPMAssertion` via `objc2-io-kit`
-- ServiceManagement `SMAppService` via `objc2-service-management`
+- ServiceManagement: none (pure ephemeral runtime)
 - Nix flake with Crane & Fenix

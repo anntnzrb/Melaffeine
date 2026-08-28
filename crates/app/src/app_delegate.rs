@@ -5,7 +5,6 @@ use std::ptr::NonNull;
 use std::time::SystemTime;
 
 use crate::iokit::IOKitProvider;
-use crate::login::LoginItemService;
 use crate::power::PowerController;
 use crate::ui::{
     COUNTDOWN_AT_SEPARATOR, COUNTDOWN_STOPS_IN_PREFIX, COUNTDOWN_TIMER_TOLERANCE,
@@ -19,10 +18,10 @@ use objc2::rc::{Retained, Weak};
 use objc2::runtime::AnyObject;
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSApplication, NSApplicationDelegate, NSButton, NSControl, NSControlStateValueOff,
-    NSControlStateValueOn, NSEvent, NSEventMask, NSEventType, NSImage, NSMenu, NSMenuItem,
-    NSPopUpButton, NSPopover, NSPopoverBehavior, NSStatusBar, NSStatusBarButton, NSStatusItem,
-    NSTextField, NSVariableStatusItemLength, NSViewController,
+    NSApplication, NSApplicationDelegate, NSButton, NSControl, NSControlStateValueOn, NSEvent,
+    NSEventMask, NSEventType, NSImage, NSMenu, NSMenuItem, NSPopUpButton, NSPopover,
+    NSPopoverBehavior, NSStatusBar, NSStatusBarButton, NSStatusItem, NSTextField,
+    NSVariableStatusItemLength, NSViewController,
 };
 use objc2_foundation::{
     NSDate, NSDateFormatter, NSDateFormatterStyle, NSNotification, NSObject, NSObjectProtocol,
@@ -42,8 +41,6 @@ pub struct AppState {
     pub unit_popup: Retained<NSPopUpButton>,
     /// "Keep display awake too" checkbox.
     pub display_awake_button: Retained<NSButton>,
-    /// "Launch at login" checkbox.
-    pub launch_at_login_button: Retained<NSButton>,
     /// Primary Start / Stop action button.
     pub start_stop_button: Retained<NSButton>,
     /// Countdown remaining time label.
@@ -117,21 +114,6 @@ define_class!(
             self.handle_start_stop();
         }
 
-        /// Handles changes to the "Launch at login" checkbox.
-        #[unsafe(method(launchAtLoginChanged:))]
-        fn launch_at_login_changed(&self, _sender: &NSButton) {
-            let state_opt = self.ivars().borrow();
-            let Some(state) = state_opt.as_ref() else {
-                return;
-            };
-            let is_checked = state.launch_at_login_button.state() == NSControlStateValueOn;
-            drop(state_opt);
-
-            if let Err(err_msg) = LoginItemService::set_enabled(is_checked) {
-                self.show_error(&err_msg);
-            }
-            self.update_ui();
-        }
 
         /// Terminates the application when Quit is clicked in the context menu.
         #[unsafe(method(quit:))]
@@ -189,10 +171,6 @@ impl AppDelegate {
                 .start_stop_button
                 .setAction(Some(sel!(startStopClicked:)));
 
-            controls.launch_at_login_button.setTarget(Some(self));
-            controls
-                .launch_at_login_button
-                .setAction(Some(sel!(launchAtLoginChanged:)));
         }
         let view_controller = NSViewController::new(mtm);
         view_controller.setView(&controls.view);
@@ -205,7 +183,6 @@ impl AppDelegate {
             duration_field: controls.duration_field,
             unit_popup: controls.unit_popup,
             display_awake_button: controls.keep_display_awake_button,
-            launch_at_login_button: controls.launch_at_login_button,
             start_stop_button: controls.start_stop_button,
             time_label: controls.time_label,
             error_label: controls.error_label,
@@ -458,12 +435,6 @@ impl AppDelegate {
             .display_awake_button
             .setEnabled(projection.display_enabled);
 
-        let login_enabled = LoginItemService::is_enabled();
-        state.launch_at_login_button.setState(if login_enabled {
-            NSControlStateValueOn
-        } else {
-            NSControlStateValueOff
-        });
 
         if let Some(countdown) = &projection.countdown_text {
             state
