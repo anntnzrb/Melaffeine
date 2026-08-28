@@ -52,6 +52,10 @@ run:
     {{ codesign }} "{{ app }}"
     "{{ bin }}"
 
+# run Melaffeine CLI controller
+cli *args:
+    cargo run --package melaffeine-cli --bin melaffeine -- {{ args }}
+
 # remove target, result, and generated bundle artifacts
 clean:
     cargo clean
