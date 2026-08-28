@@ -12,9 +12,8 @@ pub const SOCKET_NAME_PREFIX: &str = "melaffeine";
 /// Computes the default Unix Domain Socket path for the current user.
 #[must_use]
 pub fn socket_path() -> PathBuf {
-    let uid = std::env::var("UID").unwrap_or_else(|_| {
-        std::env::var("USER").unwrap_or_else(|_| String::from("default"))
-    });
+    let uid = std::env::var("UID")
+        .unwrap_or_else(|_| std::env::var("USER").unwrap_or_else(|_| String::from("default")));
     let tmp = std::env::temp_dir();
     tmp.join(format!("{SOCKET_NAME_PREFIX}-{uid}.sock"))
 }
@@ -124,7 +123,10 @@ pub fn parse_duration_spec(spec: &str) -> Option<Duration> {
         return None;
     }
 
-    if let Some(num) = trimmed.strip_suffix('s').or_else(|| trimmed.strip_suffix('S')) {
+    if let Some(num) = trimmed
+        .strip_suffix('s')
+        .or_else(|| trimmed.strip_suffix('S'))
+    {
         let secs = num.parse::<u64>().ok()?;
         if secs == 0 || secs > 31_536_000 {
             return None;
@@ -132,15 +134,24 @@ pub fn parse_duration_spec(spec: &str) -> Option<Duration> {
         return Some(Duration::from_secs(secs));
     }
 
-    if let Some(num) = trimmed.strip_suffix('m').or_else(|| trimmed.strip_suffix('M')) {
+    if let Some(num) = trimmed
+        .strip_suffix('m')
+        .or_else(|| trimmed.strip_suffix('M'))
+    {
         return parse_duration(num, DurationUnit::Minutes);
     }
 
-    if let Some(num) = trimmed.strip_suffix('h').or_else(|| trimmed.strip_suffix('H')) {
+    if let Some(num) = trimmed
+        .strip_suffix('h')
+        .or_else(|| trimmed.strip_suffix('H'))
+    {
         return parse_duration(num, DurationUnit::Hours);
     }
 
-    if let Some(num) = trimmed.strip_suffix('d').or_else(|| trimmed.strip_suffix('D')) {
+    if let Some(num) = trimmed
+        .strip_suffix('d')
+        .or_else(|| trimmed.strip_suffix('D'))
+    {
         return parse_duration(num, DurationUnit::Days);
     }
 
@@ -245,7 +256,11 @@ impl fmt::Display for IpcResponse {
             } => {
                 if *is_active {
                     let rem = remaining_compact.as_deref().unwrap_or("active");
-                    let disp = if *keep_display_awake { " (display awake)" } else { "" };
+                    let disp = if *keep_display_awake {
+                        " (display awake)"
+                    } else {
+                        ""
+                    };
                     write!(f, "Melaffeine: ACTIVE [{rem}]{disp}")
                 } else {
                     write!(f, "Melaffeine: INACTIVE")

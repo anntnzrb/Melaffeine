@@ -6,7 +6,6 @@ use std::time::{Duration, SystemTime};
 
 use crate::iokit::IOKitProvider;
 use crate::ipc_server::IpcServer;
-use app_core::ipc::{IpcCommand, IpcResponse};
 use crate::power::PowerController;
 use crate::ui::{
     COUNTDOWN_AT_SEPARATOR, COUNTDOWN_STOPS_IN_PREFIX, COUNTDOWN_TIMER_TOLERANCE,
@@ -15,6 +14,7 @@ use crate::ui::{
     build_content_view, compute_ui_projection,
 };
 use app_core::duration::{DurationUnit, format_compact_duration, parse_duration};
+use app_core::ipc::{IpcCommand, IpcResponse};
 use block2::RcBlock;
 use objc2::rc::{Retained, Weak};
 use objc2::runtime::AnyObject;
@@ -169,12 +169,10 @@ impl AppDelegate {
                 .indefinite_button
                 .setAction(Some(sel!(controlChanged:)));
 
-
             controls.start_stop_button.setTarget(Some(self));
             controls
                 .start_stop_button
                 .setAction(Some(sel!(startStopClicked:)));
-
         }
         let view_controller = NSViewController::new(mtm);
         view_controller.setView(&controls.view);
@@ -413,7 +411,6 @@ impl AppDelegate {
         Ok(())
     }
 
-
     /// Executes an incoming IPC command and generates a structured response.
     #[allow(clippy::option_if_let_else)]
     pub fn execute_ipc_command(&self, command: &IpcCommand) -> IpcResponse {
@@ -487,11 +484,7 @@ impl AppDelegate {
                     }
                 });
                 let _ = unsafe {
-                    NSTimer::scheduledTimerWithTimeInterval_repeats_block(
-                        0.05,
-                        false,
-                        &block,
-                    )
+                    NSTimer::scheduledTimerWithTimeInterval_repeats_block(0.05, false, &block)
                 };
                 IpcResponse::Ok(String::from("Terminating"))
             }
@@ -547,7 +540,6 @@ impl AppDelegate {
             .display_awake_button
             .setEnabled(projection.display_enabled);
 
-
         if let Some(countdown) = &projection.countdown_text {
             state
                 .time_label
@@ -557,12 +549,12 @@ impl AppDelegate {
             state.time_label.setStringValue(&NSString::from_str(""));
             state.time_label.setHidden(true);
         }
-        if !active
-            && let Some(conflict_app) = crate::conflicts::detect_external_conflict()
-        {
-            state.error_label.setStringValue(&NSString::from_str(&format!(
-                "Note: {conflict_app} is also running."
-            )));
+        if !active && let Some(conflict_app) = crate::conflicts::detect_external_conflict() {
+            state
+                .error_label
+                .setStringValue(&NSString::from_str(&format!(
+                    "Note: {conflict_app} is also running."
+                )));
             state.error_label.setHidden(false);
         }
 

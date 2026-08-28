@@ -110,7 +110,6 @@ fn send_ipc_command(command: &IpcCommand) -> Result<IpcResponse, String> {
         .read_line(&mut response_line)
         .map_err(|e| format!("Failed to read response: {e}"))?;
 
-    IpcResponse::parse(&response_line).ok_or_else(|| {
-        format!("Received invalid response from Melaffeine: {response_line}")
-    })
+    IpcResponse::parse(&response_line)
+        .ok_or_else(|| format!("Received invalid response from Melaffeine: {response_line}"))
 }

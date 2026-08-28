@@ -20,8 +20,8 @@ use app::ui::{
     TITLE_STOP, UNIT_DAYS_INDEX, UNIT_HOURS_INDEX, UNIT_MINUTES_INDEX, build_content_view,
     compute_ui_projection,
 };
-use app_core::ipc::{IpcCommand, IpcResponse};
 use app_core::duration::{DurationUnit, format_compact_duration, parse_duration};
+use app_core::ipc::{IpcCommand, IpcResponse};
 use objc2::runtime::ProtocolObject;
 use objc2::{DefinedClass, MainThreadMarker, msg_send};
 use objc2_app_kit::{
@@ -167,7 +167,6 @@ fn main() {
     delegate.handle_start_stop();
     delegate.stop_power_and_expiry();
 
-
     // Popover toggle
     if let Some(button) = status_item.button(mtm) {
         delegate.toggle_popover_relative_to(&button);
@@ -189,7 +188,13 @@ fn main() {
     delegate.teardown();
     // 3. Test IPC command execution
     let status_resp = delegate.execute_ipc_command(&IpcCommand::Status);
-    assert!(matches!(status_resp, IpcResponse::Status { is_active: false, .. }));
+    assert!(matches!(
+        status_resp,
+        IpcResponse::Status {
+            is_active: false,
+            ..
+        }
+    ));
 
     let start_resp = delegate.execute_ipc_command(&IpcCommand::Start {
         duration: Some(Duration::from_secs(120)),
@@ -198,14 +203,20 @@ fn main() {
     assert!(matches!(start_resp, IpcResponse::Ok(_)));
 
     let status_resp2 = delegate.execute_ipc_command(&IpcCommand::Status);
-    assert!(matches!(status_resp2, IpcResponse::Status { is_active: true, keep_display_awake: true, .. }));
+    assert!(matches!(
+        status_resp2,
+        IpcResponse::Status {
+            is_active: true,
+            keep_display_awake: true,
+            ..
+        }
+    ));
 
     let toggle_resp = delegate.execute_ipc_command(&IpcCommand::Toggle);
     assert!(matches!(toggle_resp, IpcResponse::Ok(_)));
 
     let stop_resp = delegate.execute_ipc_command(&IpcCommand::Stop);
     assert!(matches!(stop_resp, IpcResponse::Ok(_)));
-
 
     // 4. Test IOKitProvider
     let provider = IOKitProvider;
