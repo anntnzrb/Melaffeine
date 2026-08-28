@@ -1,3 +1,5 @@
+#!/usr/bin/env -S just --justfile
+
 set shell := ["sh", "-cu"]
 
 app_name := "Melaffeine"
@@ -8,7 +10,19 @@ plist := app + "/Contents/Info.plist"
 xattr := env("XATTR", "xattr -cr")
 codesign := env("CODESIGN", "codesign --force --sign -")
 
+alias b := build
+alias c := check
+alias t := test
+alias r := run
+alias fmt := format
+alias cov := coverage
+
 [default]
+[private]
+default:
+    @just --list
+
+# build release app bundle and ad-hoc sign
 build:
     cargo build --release --package app --bin {{ app_name }}
     rm -rf "{{ app }}"
@@ -19,25 +33,35 @@ build:
     {{ codesign }} "{{ app }}"
     printf 'Created %s\n' "{{ app }}"
 
-test:
-    cargo nextest run --workspace
+# run workspace tests via cargo-nextest
+test *args:
+    cargo nextest run --workspace {{ args }}
 
+# run workspace code coverage via cargo-llvm-cov
+coverage *args:
+    cargo llvm-cov --workspace {{ args }}
 
-coverage:
-    cargo llvm-cov --workspace
-run: build
+# build debug app bundle and launch Melaffeine.app
+run:
+    cargo build --package app --bin {{ app_name }}
+    rm -rf "{{ app }}"
+    mkdir -p "{{ app }}/Contents/MacOS"
+    cp "target/debug/{{ app_name }}" "{{ bin }}"
+    cp "Resources/Info.plist" "{{ plist }}"
+    {{ xattr }} "{{ app }}"
+    {{ codesign }} "{{ app }}"
     open "{{ app }}"
 
-open:
-    open "{{ app }}"
-
+# remove target, result, and generated bundle artifacts
 clean:
     cargo clean
-    rm -rf "{{ app }}"
+    rm -rf "{{ app }}" result
 
+# format project sources via nix fmt
 format:
     nix fmt
 
+# run cargo check, nextest, and clippy with denied warnings
 check:
     cargo check --workspace --all-targets
     cargo nextest run --workspace
