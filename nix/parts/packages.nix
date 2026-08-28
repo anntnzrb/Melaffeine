@@ -21,9 +21,7 @@
         MACOSX_DEPLOYMENT_TARGET = "14.0";
       };
       cargoArtifacts = craneLib.buildDepsOnly commonArgs;
-    in
-    {
-      packages.default = craneLib.buildPackage (
+      app = craneLib.buildPackage (
         commonArgs
         // {
           inherit cargoArtifacts;
@@ -38,5 +36,21 @@
           '';
         }
       );
+      cli = craneLib.buildPackage (
+        commonArgs
+        // {
+          inherit cargoArtifacts;
+          pname = "melaffeine-cli";
+          cargoExtraArgs = "--package melaffeine-cli --bin melaffeine";
+        }
+      );
+    in
+    {
+      packages = {
+        inherit app cli;
+        default = app;
+        melaffeine = app;
+        melaffeine-cli = cli;
+      };
     };
 }
