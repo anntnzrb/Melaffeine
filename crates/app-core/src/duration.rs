@@ -10,9 +10,6 @@ pub const MINUTES_PER_DAY: u64 = 1440;
 pub const MINUTES_PER_HOUR: u64 = 60;
 pub const HOURS_PER_DAY: u64 = 24;
 
-const NANOS_PER_SECOND: u128 = 1_000_000_000;
-const NANOS_PER_MINUTE: u128 = 60 * NANOS_PER_SECOND;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DurationUnit {
     Minutes,
@@ -64,32 +61,32 @@ pub fn parse_duration(input: &str, unit: DurationUnit) -> Option<Duration> {
 
 #[must_use]
 pub fn format_compact_duration(remaining: Duration) -> String {
-    let nanos = remaining.as_nanos();
-    if nanos == 0 {
+    let secs = remaining.as_secs();
+    let subsec_nanos = remaining.subsec_nanos();
+    if secs == 0 && subsec_nanos == 0 {
         return String::from("<1m");
     }
 
-    let div = nanos.checked_div(NANOS_PER_MINUTE).unwrap_or(0);
-    let rem = nanos.checked_rem(NANOS_PER_MINUTE).unwrap_or(0);
-    let add_ceil = u64::from(rem > 0);
-
-    let minutes = u64::try_from(div).map_or(u64::MAX, |m| m.saturating_add(add_ceil));
+    let div_minutes = secs / SECONDS_PER_MINUTE;
+    let rem_seconds = secs % SECONDS_PER_MINUTE;
+    let add_ceil = u64::from(rem_seconds > 0 || subsec_nanos > 0);
+    let minutes = div_minutes.saturating_add(add_ceil);
 
     if minutes == 0 {
         return String::from("<1m");
     }
 
-    let days = minutes.checked_div(MINUTES_PER_DAY).unwrap_or(0);
-    let hours = minutes
-        .checked_div(MINUTES_PER_HOUR)
-        .map_or(0, |h| h.checked_rem(HOURS_PER_DAY).unwrap_or(0));
-    let rem_minutes = minutes.checked_rem(MINUTES_PER_HOUR).unwrap_or(0);
-
+    let days = minutes / MINUTES_PER_DAY;
     if days > 0 {
+        let hours = (minutes / MINUTES_PER_HOUR) % HOURS_PER_DAY;
         format!("{days}d {hours}h")
-    } else if hours > 0 {
-        format!("{hours}h {rem_minutes}m")
     } else {
-        format!("{rem_minutes}m")
+        let hours = minutes / MINUTES_PER_HOUR;
+        if hours > 0 {
+            let rem_minutes = minutes % MINUTES_PER_HOUR;
+            format!("{hours}h {rem_minutes}m")
+        } else {
+            format!("{minutes}m")
+        }
     }
 }
