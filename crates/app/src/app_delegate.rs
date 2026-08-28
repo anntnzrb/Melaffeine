@@ -2,9 +2,11 @@
 
 use std::cell::RefCell;
 use std::ptr::NonNull;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use crate::iokit::IOKitProvider;
+use crate::ipc_server::IpcServer;
+use app_core::ipc::{IpcCommand, IpcResponse};
 use crate::power::PowerController;
 use crate::ui::{
     COUNTDOWN_AT_SEPARATOR, COUNTDOWN_STOPS_IN_PREFIX, COUNTDOWN_TIMER_TOLERANCE,
@@ -53,6 +55,8 @@ pub struct AppState {
     pub outside_click_monitor: Option<Retained<AnyObject>>,
     /// Repeating timer for updating countdown text while popover is open.
     pub countdown_timer: Option<Retained<NSTimer>>,
+    /// Active IPC server handling CLI commands over Unix domain socket.
+    pub ipc_server: Option<IpcServer>,
     /// Single-shot timer to terminate power assertion upon duration expiry.
     pub expiry_timer: Option<Retained<NSTimer>>,
 }
@@ -188,11 +192,18 @@ impl AppDelegate {
             error_label: controls.error_label,
             power: PowerController::new(IOKitProvider),
             outside_click_monitor: None,
+            ipc_server: None,
             countdown_timer: None,
             expiry_timer: None,
         };
 
         *self.ivars().borrow_mut() = Some(app_state);
+        let server = IpcServer::start(self);
+        let mut state_opt = self.ivars().borrow_mut();
+        if let Some(state) = state_opt.as_mut() {
+            state.ipc_server = server;
+        }
+        drop(state_opt);
         self.update_ui();
     }
 
@@ -324,7 +335,6 @@ impl AppDelegate {
             let Some(state) = state_opt.as_ref() else {
                 return;
             };
-
             let indefinite = state.indefinite_button.state() == NSControlStateValueOn;
             let keep_display = state.display_awake_button.state() == NSControlStateValueOn;
 
@@ -352,16 +362,32 @@ impl AppDelegate {
             }
         };
 
+        if let Err(err_msg) = self.start_session(duration_opt, keep_display) {
+            self.show_error(&err_msg);
+        }
+    }
+
+    /// Starts a power assertion session for the specified duration and display setting.
+    pub fn start_session(
+        &self,
+        duration_opt: Option<Duration>,
+        keep_display: bool,
+    ) -> Result<(), String> {
         let mut state_opt = self.ivars().borrow_mut();
         let Some(state) = state_opt.as_mut() else {
-            return;
+            return Err(String::from("App state not initialized"));
         };
+
+        if let Some(timer) = state.expiry_timer.take() {
+            timer.invalidate();
+        }
+        if let Some(timer) = state.countdown_timer.take() {
+            timer.invalidate();
+        }
 
         let now = SystemTime::now();
         if let Err(_err) = state.power.start(duration_opt, keep_display, now) {
-            drop(state_opt);
-            self.show_error(ERROR_START_FAILED);
-            return;
+            return Err(String::from(ERROR_START_FAILED));
         }
 
         if let Some(dur) = duration_opt {
@@ -384,7 +410,92 @@ impl AppDelegate {
 
         drop(state_opt);
         self.update_ui();
+        Ok(())
     }
+
+    /// Polls incoming IPC connections from the Unix Domain Socket server.
+    pub fn poll_ipc_connections(&self) {
+        let state_opt = self.ivars().borrow();
+        let Some(state) = state_opt.as_ref() else {
+            return;
+        };
+        if let Some(server) = &state.ipc_server {
+            server.poll_connections(self);
+        }
+    }
+
+    /// Executes an incoming IPC command and generates a structured response.
+    #[allow(clippy::option_if_let_else)]
+    pub fn execute_ipc_command(&self, command: &IpcCommand) -> IpcResponse {
+        match command {
+            IpcCommand::Status => {
+                let state_opt = self.ivars().borrow();
+                let Some(state) = state_opt.as_ref() else {
+                    return IpcResponse::Err(String::from("App not initialized"));
+                };
+                let is_active = state.power.is_active();
+                let keep_display_awake = state.power.keep_display_awake();
+                let ends_at = state.power.ends_at();
+                let ends_at_unix = ends_at.and_then(|t| {
+                    t.duration_since(SystemTime::UNIX_EPOCH)
+                        .ok()
+                        .map(|d| d.as_secs())
+                });
+                let remaining_compact = ends_at.map(|t| {
+                    let rem = t
+                        .duration_since(SystemTime::now())
+                        .unwrap_or(Duration::ZERO);
+                    format_compact_duration(rem)
+                });
+                IpcResponse::Status {
+                    is_active,
+                    keep_display_awake,
+                    ends_at_unix,
+                    remaining_compact,
+                }
+            }
+            IpcCommand::Stop => {
+                self.stop_power_and_expiry();
+                self.update_ui();
+                IpcResponse::Ok(String::from("Stopped sleep prevention"))
+            }
+            IpcCommand::Toggle => {
+                let is_active = {
+                    let state_opt = self.ivars().borrow();
+                    state_opt.as_ref().is_some_and(|s| s.power.is_active())
+                };
+                if is_active {
+                    self.stop_power_and_expiry();
+                    self.update_ui();
+                    IpcResponse::Ok(String::from("Stopped sleep prevention"))
+                } else {
+                    self.handle_start_stop();
+                    IpcResponse::Ok(String::from("Started sleep prevention"))
+                }
+            }
+            IpcCommand::Start {
+                duration,
+                keep_display_awake,
+            } => match self.start_session(*duration, *keep_display_awake) {
+                Ok(()) => {
+                    let desc = duration.map_or_else(
+                        || String::from("Started indefinite session"),
+                        |d| format!("Started finite session ({})", format_compact_duration(d)),
+                    );
+                    IpcResponse::Ok(desc)
+                }
+                Err(e) => IpcResponse::Err(e),
+            },
+            IpcCommand::Quit => {
+                self.teardown();
+                let mtm = MainThreadMarker::from(self);
+                let app = NSApplication::sharedApplication(mtm);
+                app.terminate(None);
+                IpcResponse::Ok(String::from("Terminating"))
+            }
+        }
+    }
+
 
     /// Stops power assertion and invalidates expiry timer.
     pub fn stop_power_and_expiry(&self) {
@@ -553,6 +664,13 @@ impl AppDelegate {
 
     /// Tears down all timers, monitors, and active power assertions upon quit.
     pub fn teardown(&self) {
+        let mut state_opt = self.ivars().borrow_mut();
+        if let Some(state) = state_opt.as_mut()
+            && let Some(mut server) = state.ipc_server.take()
+        {
+            server.stop();
+        }
+        drop(state_opt);
         self.remove_outside_click_monitor();
         self.stop_countdown_timer();
         self.stop_power_and_expiry();
