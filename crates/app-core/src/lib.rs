@@ -1,6 +1,9 @@
 #![forbid(unsafe_code)]
 
 pub mod duration;
+pub mod ipc;
+
+pub use ipc::{IpcCommand, IpcResponse, parse_duration_spec, socket_path};
 
 pub use duration::{
     DurationUnit, HOURS_PER_DAY, MAX_FINITE_DURATION_DAYS, MAX_FINITE_DURATION_SECONDS,
