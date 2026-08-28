@@ -47,6 +47,19 @@ enum Commands {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    match run_cli(cli) {
+        Ok(response) => {
+            println!("{response}");
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("{err}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run_cli(cli: Cli) -> Result<IpcResponse, String> {
     let command = match cli.command {
         Commands::Start {
             duration,
@@ -57,10 +70,9 @@ fn main() -> ExitCode {
                 None
             } else if let Some(spec) = duration {
                 let Some(dur) = parse_duration_spec(&spec) else {
-                    eprintln!(
+                    return Err(format!(
                         "Error: Invalid duration specification '{spec}'. Use format like 2h, 45m, 1d."
-                    );
-                    return ExitCode::FAILURE;
+                    ));
                 };
                 Some(dur)
             } else {
@@ -77,16 +89,7 @@ fn main() -> ExitCode {
         Commands::Quit => IpcCommand::Quit,
     };
 
-    match send_ipc_command(&command) {
-        Ok(response) => {
-            println!("{response}");
-            ExitCode::SUCCESS
-        }
-        Err(err) => {
-            eprintln!("{err}");
-            ExitCode::FAILURE
-        }
-    }
+    send_ipc_command(&command)
 }
 
 /// Sends an IPC command to the running Melaffeine application over Unix domain socket.
@@ -112,4 +115,82 @@ fn send_ipc_command(command: &IpcCommand) -> Result<IpcResponse, String> {
 
     IpcResponse::parse(&response_line)
         .ok_or_else(|| format!("Received invalid response from Melaffeine: {response_line}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cli_parsing() {
+        let status = Cli::try_parse_from(["melaffeine", "status"]).unwrap();
+        assert!(matches!(status.command, Commands::Status));
+
+        let stop = Cli::try_parse_from(["melaffeine", "stop"]).unwrap();
+        assert!(matches!(stop.command, Commands::Stop));
+
+        let toggle = Cli::try_parse_from(["melaffeine", "toggle"]).unwrap();
+        assert!(matches!(toggle.command, Commands::Toggle));
+
+        let quit = Cli::try_parse_from(["melaffeine", "quit"]).unwrap();
+        assert!(matches!(quit.command, Commands::Quit));
+
+        let start_dur = Cli::try_parse_from(["melaffeine", "start", "2h", "--display"]).unwrap();
+        if let Commands::Start {
+            duration,
+            display,
+            indefinite,
+        } = start_dur.command
+        {
+            assert_eq!(duration, Some(String::from("2h")));
+            assert!(display);
+            assert!(!indefinite);
+        } else {
+            panic!("expected Start command");
+        }
+
+        let start_indef = Cli::try_parse_from(["melaffeine", "start", "--indefinite"]).unwrap();
+        if let Commands::Start {
+            duration,
+            display,
+            indefinite,
+        } = start_indef.command
+        {
+            assert_eq!(duration, None);
+            assert!(!display);
+            assert!(indefinite);
+        } else {
+            panic!("expected Start command");
+        }
+    }
+
+    #[test]
+    fn test_send_ipc_command_not_running() {
+        let res = send_ipc_command(&IpcCommand::Status);
+        if let Err(e) = res {
+            assert!(e.contains("Could not connect to Melaffeine"));
+        }
+    }
+
+    #[test]
+    fn test_run_cli_invalid_duration() {
+        let cli = Cli::try_parse_from(["melaffeine", "start", "invalid_duration"]).unwrap();
+        let err = run_cli(cli).unwrap_err();
+        assert!(err.contains("Invalid duration specification"));
+    }
+
+    #[test]
+    fn test_run_cli_valid_commands() {
+        let cli_start = Cli::try_parse_from(["melaffeine", "start", "30m", "--display"]).unwrap();
+        let _ = run_cli(cli_start);
+
+        let cli_stop = Cli::try_parse_from(["melaffeine", "stop"]).unwrap();
+        let _ = run_cli(cli_stop);
+
+        let cli_toggle = Cli::try_parse_from(["melaffeine", "toggle"]).unwrap();
+        let _ = run_cli(cli_toggle);
+
+        let cli_quit = Cli::try_parse_from(["melaffeine", "quit"]).unwrap();
+        let _ = run_cli(cli_quit);
+    }
 }
