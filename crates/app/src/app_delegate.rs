@@ -596,3 +596,20 @@ impl AppDelegate {
         self.stop_power_and_expiry();
     }
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unit_test_app_delegate_lifecycle() {
+        if let Some(mtm) = MainThreadMarker::new() {
+            let delegate = AppDelegate::new(mtm);
+            delegate.init_app_state(mtm);
+            delegate.update_ui();
+            delegate.show_error("Test Error");
+            delegate.close_popover();
+            let _ = delegate.format_countdown(Some(SystemTime::now()));
+            delegate.teardown();
+        }
+    }
+}

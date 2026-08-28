@@ -256,3 +256,61 @@ pub fn build_content_view(mtm: MainThreadMarker) -> PopoverControls {
         error_label,
     }
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unit_test_compute_ui_projection() {
+        let p_inactive_finite = compute_ui_projection(false, false, None);
+        assert_eq!(p_inactive_finite.start_stop_title, TITLE_START);
+        assert_eq!(p_inactive_finite.status_icon, ICON_INACTIVE);
+        assert!(p_inactive_finite.duration_enabled);
+        assert!(p_inactive_finite.unit_enabled);
+        assert!(p_inactive_finite.display_enabled);
+        assert!(p_inactive_finite.indefinite_enabled);
+        assert_eq!(p_inactive_finite.countdown_text, None);
+
+        let p_inactive_indefinite = compute_ui_projection(false, true, None);
+        assert!(!p_inactive_indefinite.duration_enabled);
+        assert!(!p_inactive_indefinite.unit_enabled);
+        assert!(p_inactive_indefinite.display_enabled);
+        assert!(p_inactive_indefinite.indefinite_enabled);
+
+        let p_active_finite = compute_ui_projection(true, false, Some("1h".to_string()));
+        assert_eq!(p_active_finite.start_stop_title, TITLE_STOP);
+        assert_eq!(p_active_finite.status_icon, ICON_ACTIVE);
+        assert!(!p_active_finite.duration_enabled);
+        assert!(!p_active_finite.unit_enabled);
+        assert!(!p_active_finite.display_enabled);
+        assert!(!p_active_finite.indefinite_enabled);
+        assert_eq!(p_active_finite.countdown_text, Some("1h".to_string()));
+
+        let p_active_indefinite = compute_ui_projection(true, true, Some("1h".to_string()));
+        assert_eq!(p_active_indefinite.countdown_text, None);
+    }
+
+    #[test]
+    fn unit_test_build_content_view() {
+        if let Some(mtm) = MainThreadMarker::new() {
+            let controls = build_content_view(mtm);
+            assert_eq!(
+                controls.indefinite_button.title().to_string(),
+                TITLE_RUN_INDEFINITELY
+            );
+            assert_eq!(controls.start_stop_button.title().to_string(), TITLE_START);
+            assert_eq!(
+                controls.keep_display_awake_button.title().to_string(),
+                TITLE_KEEP_DISPLAY_AWAKE
+            );
+            assert_eq!(
+                controls.launch_at_login_button.title().to_string(),
+                TITLE_LAUNCH_AT_LOGIN
+            );
+            assert_eq!(
+                controls.duration_field.stringValue().to_string(),
+                DEFAULT_DURATION_TEXT
+            );
+        }
+    }
+}

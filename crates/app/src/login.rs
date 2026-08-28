@@ -32,3 +32,12 @@ impl LoginItemService {
         res.map_err(|err| err.localizedDescription().to_string())
     }
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unit_test_login_item_service_status() {
+        let _ = LoginItemService::is_enabled();
+    }
+}

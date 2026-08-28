@@ -150,3 +150,100 @@ impl<P: AssertionProvider> PowerController<P> {
         self.session = None;
     }
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct TestHandle(Arc<AtomicUsize>);
+    impl Drop for TestHandle {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct TestProvider {
+        drop_count: Arc<AtomicUsize>,
+        fail: bool,
+    }
+
+    impl AssertionProvider for TestProvider {
+        type Handle = TestHandle;
+        fn acquire(&self, _kind: AssertionKind) -> Result<Self::Handle, PowerError> {
+            if self.fail {
+                Err(PowerError::AcquisitionFailed(-1))
+            } else {
+                Ok(TestHandle(self.drop_count.clone()))
+            }
+        }
+    }
+
+    #[test]
+    fn unit_test_power_controller_full_lifecycle() {
+        let provider = TestProvider::default();
+        let drop_count = provider.drop_count.clone();
+        let mut controller = PowerController::new(provider);
+
+        assert!(!controller.is_active());
+        assert!(!controller.keep_display_awake());
+        assert_eq!(controller.started_at(), None);
+        assert_eq!(controller.ends_at(), None);
+
+        let now = SystemTime::now();
+        let dur = Duration::from_secs(3600);
+        assert!(controller.start(Some(dur), true, now).is_ok());
+        assert!(controller.is_active());
+        assert!(controller.keep_display_awake());
+        assert_eq!(controller.started_at(), Some(now));
+        assert_eq!(controller.ends_at(), Some(now + dur));
+
+        // Replace session
+        assert!(controller.start(None, false, now).is_ok());
+        assert_eq!(drop_count.load(Ordering::SeqCst), 1);
+        assert!(controller.is_active());
+        assert!(!controller.keep_display_awake());
+        assert_eq!(controller.ends_at(), None);
+
+        // Stop
+        controller.stop();
+        assert_eq!(drop_count.load(Ordering::SeqCst), 2);
+        assert!(!controller.is_active());
+
+        // Idempotent stop
+        controller.stop();
+        assert_eq!(drop_count.load(Ordering::SeqCst), 2);
+
+        // Failed start
+        let fail_provider = TestProvider {
+            drop_count: Arc::new(AtomicUsize::new(0)),
+            fail: true,
+        };
+        let mut fail_controller = PowerController::new(fail_provider);
+        assert!(fail_controller.start(None, false, now).is_err());
+        assert!(!fail_controller.is_active());
+
+        // Debug formatting
+        let debug_repr = format!("{controller:?}");
+        assert!(debug_repr.contains("PowerController"));
+    }
+
+    #[test]
+    fn unit_test_power_error_and_kinds() {
+        let err = PowerError::AcquisitionFailed(42);
+        assert_eq!(err.code(), 42);
+        assert!(format!("{err}").contains("42"));
+        assert!(err.source().is_none());
+
+        let err2 = err.clone();
+        assert_eq!(err, err2);
+
+        let kind = AssertionKind::PreventSystemSleep;
+        let kind2 = AssertionKind::PreventDisplaySleep;
+        assert_ne!(kind, kind2);
+        assert_eq!(format!("{kind:?}"), "PreventSystemSleep");
+        let kind3 = kind;
+        assert_eq!(kind, kind3);
+    }
+}
