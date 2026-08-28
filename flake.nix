@@ -12,10 +12,6 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
     crane.url = "github:ipetkov/crane/master";
-    git-hooks = {
-      url = "github:cachix/git-hooks.nix/master";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
     treefmt-nix = {
       url = "github:numtide/treefmt-nix/main";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -33,7 +29,6 @@
       );
       systems = [
         "aarch64-darwin"
-        "x86_64-darwin"
       ];
     };
 }

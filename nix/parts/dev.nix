@@ -2,7 +2,6 @@
   perSystem =
     {
       pkgs,
-      config,
       rustToolchain,
       ...
     }:
@@ -24,7 +23,7 @@
         MACOSX_DEPLOYMENT_TARGET = "14.0";
 
         shellHook = ''
-          ${config.pre-commit.installationScript}
+          git config core.hooksPath .githooks 2>/dev/null || true
           echo "🦀 Rust $(rustc --version) dev environment loaded!"
         '';
       };

@@ -56,6 +56,11 @@ run:
 cli *args:
     cargo run --package melaffeine-cli --bin melaffeine -- {{ args }}
 
+# configure git to use checked-in .githooks
+install-hooks:
+    git config core.hooksPath .githooks
+    chmod +x .githooks/*
+    printf 'Git hooks installed from .githooks\n'
 # remove target, result, and generated bundle artifacts
 clean:
     cargo clean

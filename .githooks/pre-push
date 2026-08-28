@@ -1,0 +1,10 @@
+#!/usr/bin/env sh
+set -eu
+
+# Run full test suite, clippy, and checks before pushing
+if command -v just >/dev/null 2>&1; then
+    printf 'Running pre-push checks via just check...\n'
+    just check
+else
+    echo "Warning: 'just' command not found, skipping pre-push verification."
+fi

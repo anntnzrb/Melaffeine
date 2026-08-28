@@ -1,0 +1,10 @@
+#!/usr/bin/env sh
+set -eu
+
+# Verify formatting and workspace compilation before committing
+if command -v just >/dev/null 2>&1; then
+    just --fmt --check
+    cargo check --workspace --all-targets
+else
+    echo "Warning: 'just' command not found, skipping pre-commit verification."
+fi
