@@ -274,7 +274,7 @@ fn main() {
     assert_eq!(parse_duration("525601", DurationUnit::Minutes), None);
 
     assert_eq!(format_compact_duration(Duration::from_nanos(0)), "<1m");
-    assert_eq!(format_compact_duration(Duration::from_secs(30)), "1m");
+    assert_eq!(format_compact_duration(Duration::from_secs(30)), "<1m");
     assert_eq!(format_compact_duration(Duration::from_secs(60)), "1m");
     assert_eq!(format_compact_duration(Duration::from_secs(3600)), "1h 0m");
     assert_eq!(format_compact_duration(Duration::from_secs(3660)), "1h 1m");

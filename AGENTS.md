@@ -17,7 +17,7 @@ User-facing behavior:
 ## Architecture & Data Flow
 
 Melaffeine is structured as a two-crate Cargo workspace:
-- `crates/app-core`: Pure domain logic with `#![forbid(unsafe_code)]`. Contains duration parsing (`DurationUnit`, `parse_duration`) and compact ceiling-minute formatting (`format_compact_duration`).
+- `crates/app-core`: Pure domain logic with `#![forbid(unsafe_code)]`. Contains duration parsing (`DurationUnit`, `parse_duration`) and compact minute formatting (`format_compact_duration`).
 - `crates/app`: Native macOS AppKit application binary (`Melaffeine`). Contains the `NSApplicationDelegate` lifecycle, UI view construction, `UiProjection` state modeling, `PowerController` assertion management, and Apple framework adapters (`IOKitProvider` and `SMAppService`).
 
 High-level flow:

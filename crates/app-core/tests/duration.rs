@@ -258,58 +258,67 @@ fn format_compact_duration_cases() {
     assert_eq!(format_compact_duration(Duration::ZERO), "<1m");
     assert_eq!(format_compact_duration(Duration::from_secs(0)), "<1m");
 
-    // Sub-second durations
-    assert_eq!(format_compact_duration(Duration::from_nanos(1)), "1m");
-    assert_eq!(format_compact_duration(Duration::from_micros(1)), "1m");
-    assert_eq!(format_compact_duration(Duration::from_millis(1)), "1m");
-    assert_eq!(format_compact_duration(Duration::from_millis(500)), "1m");
-    assert_eq!(format_compact_duration(Duration::from_millis(999)), "1m");
+    // Sub-second durations (< 60s -> <1m)
+    assert_eq!(format_compact_duration(Duration::from_nanos(1)), "<1m");
+    assert_eq!(format_compact_duration(Duration::from_micros(1)), "<1m");
+    assert_eq!(format_compact_duration(Duration::from_millis(1)), "<1m");
+    assert_eq!(format_compact_duration(Duration::from_millis(500)), "<1m");
+    assert_eq!(format_compact_duration(Duration::from_millis(999)), "<1m");
     assert_eq!(
         format_compact_duration(Duration::from_nanos(59_999_999_999)),
-        "1m"
+        "<1m"
     );
 
-    // 1..59 seconds
-    assert_eq!(format_compact_duration(Duration::from_secs(1)), "1m");
-    assert_eq!(format_compact_duration(Duration::from_secs(30)), "1m");
-    assert_eq!(format_compact_duration(Duration::from_secs(59)), "1m");
+    // 1..59 seconds (< 60s -> <1m)
+    assert_eq!(format_compact_duration(Duration::from_secs(1)), "<1m");
+    assert_eq!(format_compact_duration(Duration::from_secs(30)), "<1m");
+    assert_eq!(format_compact_duration(Duration::from_secs(59)), "<1m");
 
-    // 60 seconds
+    // 60..119 seconds (1m)
     assert_eq!(format_compact_duration(Duration::from_secs(60)), "1m");
     assert_eq!(
         format_compact_duration(Duration::from_secs(60) + Duration::from_nanos(1)),
-        "2m"
+        "1m"
     );
+    assert_eq!(format_compact_duration(Duration::from_secs(61)), "1m");
+    assert_eq!(format_compact_duration(Duration::from_secs(119)), "1m");
 
-    // 61..120 seconds
-    assert_eq!(format_compact_duration(Duration::from_secs(61)), "2m");
-    assert_eq!(format_compact_duration(Duration::from_secs(119)), "2m");
+    // 120..179 seconds (2m)
     assert_eq!(format_compact_duration(Duration::from_secs(120)), "2m");
-    assert_eq!(format_compact_duration(Duration::from_secs(121)), "3m");
+    assert_eq!(format_compact_duration(Duration::from_secs(121)), "2m");
+    assert_eq!(format_compact_duration(Duration::from_secs(179)), "2m");
 
     // Minute and hour boundaries
     assert_eq!(format_compact_duration(Duration::from_secs(3540)), "59m"); // 59 minutes
-    assert_eq!(format_compact_duration(Duration::from_secs(3541)), "1h 0m"); // 59m 1s -> ceil 60m = 1h 0m
-    assert_eq!(format_compact_duration(Duration::from_secs(3599)), "1h 0m"); // 59m 59s -> ceil 60m = 1h 0m
+    assert_eq!(format_compact_duration(Duration::from_secs(3541)), "59m"); // 59m 1s -> 59m
+    assert_eq!(format_compact_duration(Duration::from_secs(3599)), "59m"); // 59m 59s -> 59m
     assert_eq!(format_compact_duration(Duration::from_secs(3600)), "1h 0m"); // exactly 1 hour
-    assert_eq!(format_compact_duration(Duration::from_secs(3601)), "1h 1m"); // 1h 1s -> ceil 1h 1m
+    assert_eq!(format_compact_duration(Duration::from_secs(3601)), "1h 0m"); // 1h 0m 1s -> 1h 0m
+    assert_eq!(format_compact_duration(Duration::from_secs(3659)), "1h 0m"); // 1h 0m 59s -> 1h 0m
+    assert_eq!(format_compact_duration(Duration::from_secs(3660)), "1h 1m"); // 1h 1m 0s -> 1h 1m
     assert_eq!(format_compact_duration(Duration::from_secs(7140)), "1h 59m"); // 1h 59m
-    assert_eq!(format_compact_duration(Duration::from_secs(7141)), "2h 0m"); // 1h 59m 1s -> ceil 2h 0m
+    assert_eq!(format_compact_duration(Duration::from_secs(7141)), "1h 59m"); // 1h 59m 1s -> 1h 59m
+    assert_eq!(format_compact_duration(Duration::from_secs(7199)), "1h 59m"); // 1h 59m 59s -> 1h 59m
     assert_eq!(format_compact_duration(Duration::from_secs(7200)), "2h 0m"); // 2 hours
-    assert_eq!(format_compact_duration(Duration::from_secs(7201)), "2h 1m"); // 2h 1s -> ceil 2h 1m
+    assert_eq!(format_compact_duration(Duration::from_secs(7201)), "2h 0m"); // 2h 0m 1s -> 2h 0m
+    assert_eq!(format_compact_duration(Duration::from_secs(7259)), "2h 0m"); // 2h 0m 59s -> 2h 0m
+    assert_eq!(format_compact_duration(Duration::from_secs(7260)), "2h 1m"); // 2h 1m 0s -> 2h 1m
     assert_eq!(
         format_compact_duration(Duration::from_secs(86340)),
         "23h 59m"
     ); // 23h 59m
-    assert_eq!(format_compact_duration(Duration::from_secs(86341)), "1d 0h"); // 23h 59m 1s -> ceil 24h 0m = 1d 0h
+    assert_eq!(
+        format_compact_duration(Duration::from_secs(86399)),
+        "23h 59m"
+    ); // 23h 59m 59s -> 23h 59m
 
     // Day boundaries
     assert_eq!(format_compact_duration(Duration::from_secs(86400)), "1d 0h"); // exactly 1 day
-    assert_eq!(format_compact_duration(Duration::from_secs(86401)), "1d 0h"); // 1d 1s -> 1441m -> 1d 0h
-    assert_eq!(format_compact_duration(Duration::from_secs(89940)), "1d 0h"); // 1d 59m -> 1499m -> 1d 0h
-    assert_eq!(format_compact_duration(Duration::from_secs(89941)), "1d 1h"); // 1d 59m 1s -> 1500m -> 1d 1h
+    assert_eq!(format_compact_duration(Duration::from_secs(86401)), "1d 0h"); // 1d 1s -> 1d 0h
+    assert_eq!(format_compact_duration(Duration::from_secs(89940)), "1d 0h"); // 1d 59m -> 1d 0h
+    assert_eq!(format_compact_duration(Duration::from_secs(89999)), "1d 0h"); // 1d 59m 59s -> 1d 0h
     assert_eq!(format_compact_duration(Duration::from_secs(90000)), "1d 1h"); // 1 day 1 hour
-    assert_eq!(format_compact_duration(Duration::from_secs(90001)), "1d 1h"); // 1d 1h 1s -> 1501m -> 1d 1h
+    assert_eq!(format_compact_duration(Duration::from_secs(90001)), "1d 1h"); // 1d 1h 1s -> 1d 1h
     assert_eq!(
         format_compact_duration(Duration::from_secs(169200)),
         "1d 23h"

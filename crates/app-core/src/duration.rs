@@ -61,17 +61,7 @@ pub fn parse_duration(input: &str, unit: DurationUnit) -> Option<Duration> {
 
 #[must_use]
 pub fn format_compact_duration(remaining: Duration) -> String {
-    let secs = remaining.as_secs();
-    let subsec_nanos = remaining.subsec_nanos();
-    if secs == 0 && subsec_nanos == 0 {
-        return String::from("<1m");
-    }
-
-    let div_minutes = secs / SECONDS_PER_MINUTE;
-    let rem_seconds = secs % SECONDS_PER_MINUTE;
-    let add_ceil = u64::from(rem_seconds > 0 || subsec_nanos > 0);
-    let minutes = div_minutes.saturating_add(add_ceil);
-
+    let minutes = remaining.as_secs() / SECONDS_PER_MINUTE;
     if minutes == 0 {
         return String::from("<1m");
     }
