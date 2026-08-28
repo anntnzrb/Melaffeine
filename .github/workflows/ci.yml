@@ -15,15 +15,13 @@ jobs:
   check:
     name: Nix Flake & Workspace Check (Apple Silicon)
     runs-on: macos-14
+    timeout-minutes: 15
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@main
-
-      - name: Magic Nix Cache
-        uses: DeterminateSystems/magic-nix-cache-action@main
 
       - name: Nix Flake Checks
         run: nix flake check
