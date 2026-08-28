@@ -68,7 +68,7 @@ needless_borrows_for_generic_args = "deny"
 
 [profile.dev]
 opt-level = 0
-debug = 1
+debug = 2
 
 [profile.dev.package."*"]
 opt-level = 3
