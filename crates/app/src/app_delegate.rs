@@ -269,10 +269,19 @@ impl AppDelegate {
         };
         menu.addItem(&quit_item);
 
-        let state_opt = self.ivars().borrow();
-        if let Some(state) = state_opt.as_ref() {
-            state.status_item.setMenu(Some(&menu));
-            state.status_item.setMenu(None);
+        let status_item = {
+            let state_opt = self.ivars().borrow();
+            state_opt
+                .as_ref()
+                .map(|state| (state.status_item.clone(), state.status_item.button(mtm)))
+        };
+        if let Some((item, button)) = status_item {
+            item.setMenu(Some(&menu));
+            if let Some(btn) = button {
+                // SAFETY: performClick is called on the main thread.
+                unsafe { btn.performClick(None) };
+            }
+            item.setMenu(None);
         }
     }
 
