@@ -12,6 +12,7 @@
         packages = [
           rustToolchain
           pkgs.cargo-nextest
+          pkgs.cargo-llvm-cov
           pkgs.watchexec
           pkgs.just
         ];

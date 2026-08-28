@@ -22,6 +22,9 @@ build:
 test:
     cargo nextest run --workspace
 
+
+coverage:
+    cargo llvm-cov --workspace
 run: build
     open "{{ app }}"
 
