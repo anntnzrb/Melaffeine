@@ -41,7 +41,7 @@ test *args:
 coverage *args:
     cargo llvm-cov --workspace {{ args }}
 
-# build debug app bundle and launch Melaffeine.app
+# build debug app bundle and launch Melaffeine in the foreground
 run:
     cargo build --package app --bin {{ app_name }}
     rm -rf "{{ app }}"
@@ -50,7 +50,7 @@ run:
     cp "Resources/Info.plist" "{{ plist }}"
     {{ xattr }} "{{ app }}"
     {{ codesign }} "{{ app }}"
-    open "{{ app }}"
+    "{{ bin }}"
 
 # remove target, result, and generated bundle artifacts
 clean:
