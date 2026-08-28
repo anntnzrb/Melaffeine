@@ -183,18 +183,6 @@ impl AppDelegate {
                 .indefinite_button
                 .setAction(Some(sel!(controlChanged:)));
 
-            controls.duration_field.setTarget(Some(self));
-            controls
-                .duration_field
-                .setAction(Some(sel!(controlChanged:)));
-
-            controls.unit_popup.setTarget(Some(self));
-            controls.unit_popup.setAction(Some(sel!(controlChanged:)));
-
-            controls.keep_display_awake_button.setTarget(Some(self));
-            controls
-                .keep_display_awake_button
-                .setAction(Some(sel!(controlChanged:)));
 
             controls.start_stop_button.setTarget(Some(self));
             controls
@@ -426,6 +414,9 @@ impl AppDelegate {
         let mut state_opt = self.ivars().borrow_mut();
         if let Some(state) = state_opt.as_mut() {
             if let Some(timer) = state.expiry_timer.take() {
+                timer.invalidate();
+            }
+            if let Some(timer) = state.countdown_timer.take() {
                 timer.invalidate();
             }
             state.power.stop();
