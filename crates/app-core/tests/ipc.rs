@@ -18,17 +18,23 @@ fn test_socket_path() {
 #[test]
 fn test_parse_duration_spec() {
     assert_eq!(parse_duration_spec("30s"), Some(Duration::from_secs(30)));
+    assert_eq!(parse_duration_spec("30S"), Some(Duration::from_secs(30)));
     assert_eq!(parse_duration_spec("15m"), Some(Duration::from_secs(900)));
+    assert_eq!(parse_duration_spec("15M"), Some(Duration::from_secs(900)));
     assert_eq!(parse_duration_spec("2h"), Some(Duration::from_secs(7200)));
+    assert_eq!(parse_duration_spec("2H"), Some(Duration::from_secs(7200)));
     assert_eq!(parse_duration_spec("1d"), Some(Duration::from_secs(86400)));
+    assert_eq!(parse_duration_spec("1D"), Some(Duration::from_secs(86400)));
     assert_eq!(parse_duration_spec("10"), Some(Duration::from_secs(600))); // Bare number defaults to minutes
 
     assert_eq!(parse_duration_spec(""), None);
     assert_eq!(parse_duration_spec("0s"), None);
     assert_eq!(parse_duration_spec("0m"), None);
+    assert_eq!(parse_duration_spec("0h"), None);
+    assert_eq!(parse_duration_spec("0d"), None);
+    assert_eq!(parse_duration_spec("31536001s"), None);
     assert_eq!(parse_duration_spec("invalid"), None);
 }
-
 #[test]
 fn test_ipc_command_serialize_and_parse() {
     // Start finite
@@ -58,12 +64,22 @@ fn test_ipc_command_serialize_and_parse() {
     assert_eq!(s_indef, "START indefinite\n");
     assert_eq!(IpcCommand::parse(&s_indef), Some(cmd_indef));
 
-    // Stop, Toggle, Status, Quit
-    assert_eq!(IpcCommand::parse("STOP\n"), Some(IpcCommand::Stop));
-    assert_eq!(IpcCommand::parse("TOGGLE\n"), Some(IpcCommand::Toggle));
-    assert_eq!(IpcCommand::parse("STATUS\n"), Some(IpcCommand::Status));
-    assert_eq!(IpcCommand::parse("QUIT\n"), Some(IpcCommand::Quit));
+    // Stop, Toggle, Status, Quit serialization & parse
+    let stop = IpcCommand::Stop;
+    assert_eq!(stop.serialize(), "STOP\n");
+    assert_eq!(IpcCommand::parse(&stop.serialize()), Some(stop));
 
+    let toggle = IpcCommand::Toggle;
+    assert_eq!(toggle.serialize(), "TOGGLE\n");
+    assert_eq!(IpcCommand::parse(&toggle.serialize()), Some(toggle));
+
+    let status = IpcCommand::Status;
+    assert_eq!(status.serialize(), "STATUS\n");
+    assert_eq!(IpcCommand::parse(&status.serialize()), Some(status));
+
+    let quit = IpcCommand::Quit;
+    assert_eq!(quit.serialize(), "QUIT\n");
+    assert_eq!(IpcCommand::parse(&quit.serialize()), Some(quit));
     // Case insensitivity
     assert_eq!(IpcCommand::parse("stop\n"), Some(IpcCommand::Stop));
     assert_eq!(IpcCommand::parse("status\n"), Some(IpcCommand::Status));
@@ -101,11 +117,43 @@ fn test_ipc_response_serialize_parse_display() {
     assert_eq!(IpcResponse::parse(&s_status), Some(status_active.clone()));
     assert!(format!("{status_active}").contains("ACTIVE [1h 30m] (display awake)"));
 
+    // Active status without display awake and without remaining
+    let status_active_no_disp = IpcResponse::Status {
+        is_active: true,
+        keep_display_awake: false,
+        ends_at_unix: None,
+        remaining_compact: None,
+    };
+    let s_no_disp = status_active_no_disp.serialize();
+    assert!(s_no_disp.contains("ends_at=none"));
+    assert!(s_no_disp.contains("remaining=none"));
+    assert_eq!(
+        IpcResponse::parse(&s_no_disp),
+        Some(status_active_no_disp.clone())
+    );
+    assert_eq!(
+        format!("{status_active_no_disp}"),
+        "Melaffeine: ACTIVE [active]"
+    );
+
     let status_inactive = IpcResponse::Status {
         is_active: false,
         keep_display_awake: false,
         ends_at_unix: None,
         remaining_compact: None,
     };
-    assert!(format!("{status_inactive}").contains("INACTIVE"));
+    assert_eq!(format!("{status_inactive}"), "Melaffeine: INACTIVE");
+
+    // Invalid response lines
+    assert_eq!(IpcResponse::parse(""), None);
+    assert_eq!(IpcResponse::parse("UNKNOWN response"), None);
+    assert_eq!(
+        IpcResponse::parse("STATUS active=invalid ends_at=notanumber remaining=none"),
+        Some(IpcResponse::Status {
+            is_active: false,
+            keep_display_awake: false,
+            ends_at_unix: None,
+            remaining_compact: None,
+        })
+    );
 }
