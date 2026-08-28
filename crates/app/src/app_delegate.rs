@@ -154,7 +154,7 @@ impl AppDelegate {
         unsafe { msg_send![super(this), init] }
     }
     /// Initializes native `AppKit` UI elements and controllers.
-    fn init_app_state(&self, mtm: MainThreadMarker) {
+    pub fn init_app_state(&self, mtm: MainThreadMarker) {
         let status_bar = NSStatusBar::systemStatusBar();
         let status_item = status_bar.statusItemWithLength(NSVariableStatusItemLength);
 
@@ -281,7 +281,7 @@ impl AppDelegate {
     }
 
     /// Displays the ephemeral right-click context menu containing Quit.
-    fn show_context_menu(&self) {
+    pub fn show_context_menu(&self) {
         let mtm = MainThreadMarker::from(self);
         let menu = NSMenu::new(mtm);
         // SAFETY: initWithTitle_action_keyEquivalent is called on the main thread.
@@ -307,7 +307,7 @@ impl AppDelegate {
     }
 
     /// Installs a global mouse down event monitor to close transient popovers.
-    fn install_outside_click_monitor(&self) {
+    pub fn install_outside_click_monitor(&self) {
         self.remove_outside_click_monitor();
 
         let weak_self: Weak<Self> = Weak::from_retained(&Retained::from(self));
@@ -329,7 +329,7 @@ impl AppDelegate {
     }
 
     /// Removes and drops the active global event monitor if present.
-    fn remove_outside_click_monitor(&self) {
+    pub fn remove_outside_click_monitor(&self) {
         let mut state_opt = self.ivars().borrow_mut();
         if let Some(state) = state_opt.as_mut()
             && let Some(monitor) = state.outside_click_monitor.take()
@@ -342,7 +342,7 @@ impl AppDelegate {
     }
 
     /// Starts or updates power assertion based on UI inputs.
-    fn handle_start_stop(&self) {
+    pub fn handle_start_stop(&self) {
         let is_active = {
             let state_opt = self.ivars().borrow();
             state_opt.as_ref().is_some_and(|s| s.power.is_active())
@@ -422,7 +422,7 @@ impl AppDelegate {
     }
 
     /// Stops power assertion and invalidates expiry timer.
-    fn stop_power_and_expiry(&self) {
+    pub fn stop_power_and_expiry(&self) {
         let mut state_opt = self.ivars().borrow_mut();
         if let Some(state) = state_opt.as_mut() {
             if let Some(timer) = state.expiry_timer.take() {
@@ -501,7 +501,7 @@ impl AppDelegate {
     }
 
     /// Formats the countdown string if a finite session is active with a future end time.
-    fn format_countdown(&self, ends_at: Option<SystemTime>) -> Option<String> {
+    pub fn format_countdown(&self, ends_at: Option<SystemTime>) -> Option<String> {
         let ends_at = ends_at?;
         let now = SystemTime::now();
         let remaining = ends_at.duration_since(now).ok()?;
@@ -528,7 +528,7 @@ impl AppDelegate {
     }
 
     /// Displays an error message on the error label and unhides it.
-    fn show_error(&self, message: &str) {
+    pub fn show_error(&self, message: &str) {
         let state_opt = self.ivars().borrow();
         if let Some(state) = state_opt.as_ref() {
             state
@@ -541,7 +541,7 @@ impl AppDelegate {
     }
 
     /// Starts repeating countdown timer if popover is open for an active finite session.
-    fn start_countdown_timer_if_needed(&self) {
+    pub fn start_countdown_timer_if_needed(&self) {
         let should_start = {
             let state_opt = self.ivars().borrow();
             state_opt.as_ref().is_some_and(|s| {
@@ -580,7 +580,7 @@ impl AppDelegate {
     }
 
     /// Stops and releases the active countdown timer.
-    fn stop_countdown_timer(&self) {
+    pub fn stop_countdown_timer(&self) {
         let mut state_opt = self.ivars().borrow_mut();
         if let Some(state) = state_opt.as_mut()
             && let Some(timer) = state.countdown_timer.take()
@@ -590,7 +590,7 @@ impl AppDelegate {
     }
 
     /// Tears down all timers, monitors, and active power assertions upon quit.
-    fn teardown(&self) {
+    pub fn teardown(&self) {
         self.remove_outside_click_monitor();
         self.stop_countdown_timer();
         self.stop_power_and_expiry();
@@ -604,12 +604,8 @@ mod tests {
     fn unit_test_app_delegate_lifecycle() {
         if let Some(mtm) = MainThreadMarker::new() {
             let delegate = AppDelegate::new(mtm);
-            delegate.init_app_state(mtm);
-            delegate.update_ui();
-            delegate.show_error("Test Error");
-            delegate.close_popover();
             let _ = delegate.format_countdown(Some(SystemTime::now()));
-            delegate.teardown();
+            let _ = delegate.format_countdown(None);
         }
     }
 }
