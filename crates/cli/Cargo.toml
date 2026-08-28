@@ -1,0 +1,15 @@
+[package]
+name = "melaffeine-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "melaffeine"
+path = "src/main.rs"
+
+[dependencies]
+app-core = { workspace = true }
+clap = { workspace = true }
+
+[lints]
+workspace = true
