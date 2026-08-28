@@ -2,41 +2,65 @@ name: Release
 
 on:
   push:
-    tags:
-      - 'v*'
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - '.gitignore'
   workflow_dispatch:
 
 permissions:
   contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   build-and-release:
     name: Build & Release Apple Silicon Binaries
     runs-on: macos-14
     timeout-minutes: 15
+    if: "!contains(github.event.head_commit.message, '[skip release]')"
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Determine Monotonic Version
+        run: |
+          VERSION="0.1.${{ github.run_number }}"
+          TAG_NAME="v${VERSION}"
+          echo "VERSION=${VERSION}" >> $GITHUB_ENV
+          echo "TAG_NAME=${TAG_NAME}" >> $GITHUB_ENV
+          echo "Release version: ${TAG_NAME} (${VERSION})"
+
+      - name: Stamp Release Version in Metadata
+        run: |
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${VERSION}" Resources/Info.plist
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${{ github.run_number }}" Resources/Info.plist
 
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@main
 
       - name: Build Melaffeine.app and CLI via Nix
         run: |
-          nix build .#default
-          nix build .#cli
+          nix build .#default --out-link result-app
+          nix build .#cli --out-link result-cli
 
           mkdir -p release-artifacts
           # Package App bundle into zip
-          ditto -c -k --keepParent result/Applications/Melaffeine.app release-artifacts/Melaffeine-aarch64-apple-darwin.zip
+          ditto -c -k --keepParent result-app/Applications/Melaffeine.app release-artifacts/Melaffeine-aarch64-apple-darwin.zip
           # Copy standalone CLI binary
-          cp result-1/bin/melaffeine release-artifacts/melaffeine-cli-aarch64-apple-darwin
+          cp result-cli/bin/melaffeine release-artifacts/melaffeine-cli-aarch64-apple-darwin
           chmod +x release-artifacts/melaffeine-cli-aarch64-apple-darwin
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ env.TAG_NAME }}
+          name: Melaffeine ${{ env.TAG_NAME }}
           files: |
             release-artifacts/Melaffeine-aarch64-apple-darwin.zip
             release-artifacts/melaffeine-cli-aarch64-apple-darwin
           generate_release_notes: true
+          make_latest: true
