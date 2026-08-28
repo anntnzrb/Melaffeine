@@ -33,8 +33,8 @@ impl AssertionProvider for IOKitProvider {
             AssertionKind::PreventDisplaySleep => "PreventUserIdleDisplaySleep",
         };
 
-        let type_cf = CFString::from_str(type_name);
-        let name_cf = CFString::from_str("Melaffeine");
+        let type_cf = CFString::from_static_str(type_name);
+        let name_cf = CFString::from_static_str("Melaffeine");
         let mut assertion_id: objc2_io_kit::IOPMAssertionID = 0;
 
         // SAFETY: `IOPMAssertionCreateWithName` is called with valid CFString pointers,
