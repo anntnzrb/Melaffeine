@@ -1,11 +1,10 @@
-# Build products
+# Rust build targets & Nix
+/target/
+result
 *.app/
 *.dSYM/
-DerivedData/
-build/
-.build/
-Tests/DurationTests
-result
+.direnv/
+/.pre-commit-config.yaml
 
 # macOS metadata
 .DS_Store
@@ -16,7 +15,7 @@ Icon
 .Spotlight-V100
 .Trashes
 
-# Local editor/agent noise
+# Editor & IDE noise
 .vscode/
 .idea/
 *.swp

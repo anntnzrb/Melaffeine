@@ -1,0 +1,53 @@
+[package]
+name = "app"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "app"
+path = "src/lib.rs"
+
+[[bin]]
+name = "Melaffeine"
+path = "src/main.rs"
+
+[dependencies]
+app-core.workspace = true
+objc2.workspace = true
+block2.workspace = true
+objc2-foundation = { workspace = true, features = [
+    "NSArray",
+    "NSDate",
+    "NSDateFormatter",
+    "NSError",
+    "NSString",
+    "NSTimer",
+    "block2",
+] }
+objc2-app-kit = { workspace = true, features = [
+    "NSApplication",
+    "NSButton",
+    "NSCell",
+    "NSColor",
+    "NSControl",
+    "NSEvent",
+    "NSImage",
+    "NSMenu",
+    "NSPopover",
+    "NSPopUpButton",
+    "NSResponder",
+    "NSRunningApplication",
+    "NSStatusBar",
+    "NSStatusBarButton",
+    "NSStatusItem",
+    "NSTextField",
+    "NSView",
+    "NSViewController",
+    "block2",
+] }
+objc2-service-management = { workspace = true, features = ["SMAppService"] }
+objc2-io-kit = { workspace = true, features = ["pwr_mgt"] }
+objc2-core-foundation = { workspace = true, features = ["CFString"] }
+
+[lints]
+workspace = true

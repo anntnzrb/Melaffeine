@@ -2,43 +2,50 @@
 
 ## Project Overview
 
-Melaffeine is a tiny native macOS menu-bar utility that prevents sleep using native IOKit power assertions. It is intentionally Objective-C/AppKit only: no Swift, no SwiftUI, no Xcode project, no package manager.
+Melaffeine is a tiny native macOS menu-bar utility that prevents sleep using native IOKit power assertions. It is implemented in 100% Rust (Rust 2024 edition) using modern `objc2` bindings for AppKit, IOKit, and ServiceManagement. It contains no Objective-C, Swift, SwiftUI, or Xcode project files.
 
 User-facing behavior:
-- icon-only menu-bar app, no Dock icon
+- icon-only menu-bar app, no Dock icon (`LSUIElement = true` / `NSApplicationActivationPolicyAccessory`)
 - left-click opens controls
-- right-click shows Quit
+- right-click shows Quit with no shortcut hint
 - Start/Stop sleep prevention
 - finite duration in minutes/hours/days or true indefinite mode
 - optional display-awake mode
+- launch at login support via `SMAppService`
 - no persisted active state after quit/reboot
 
 ## Architecture & Data Flow
 
+Melaffeine is structured as a two-crate Cargo workspace:
+- `crates/app-core`: Pure domain logic with `#![forbid(unsafe_code)]`. Contains duration parsing (`DurationUnit`, `parse_duration`) and compact ceiling-minute formatting (`format_compact_duration`).
+- `crates/app`: Native macOS AppKit application binary (`Melaffeine`). Contains the `NSApplicationDelegate` lifecycle, UI view construction, `UiProjection` state modeling, `PowerController` assertion management, and Apple framework adapters (`IOKitProvider` and `SMAppService`).
+
 High-level flow:
 
 ```text
-main.m
-  -> NSApplication + AppDelegate
-  -> AppDelegate owns status item, popover UI, PowerController
-  -> PowerController owns IOPMAssertionID + optional NSTimer
-  -> PowerController posts PowerControllerDidChangeNotification
-  -> AppDelegate updateStateUI syncs button labels, enabled controls, status icon
+main.rs
+  -> NSApplication + AppDelegate (objc2 define_class!)
+  -> AppDelegate owns NSStatusItem, NSPopover, controls, PowerController<IOKitProvider>
+  -> PowerController acquires/releases IOPMAssertion via IOKitProvider (objc2-io-kit)
+  -> UiProjection derives UI state deterministically from PowerController + control inputs
+  -> AppDelegate updates status icon, button labels, countdown text, and input enabled states
 ```
 
 Key patterns:
-- `AppDelegate` is the UI/lifecycle coordinator.
-- `PowerController` is the IOKit boundary and owns assertion cleanup.
-- Constants live in `Constants.h/.m` with `CT` prefix.
-- No persisted settings/state. Runtime state dies with the process.
-- `LSUIElement=true` is generated into the app bundle; `main.m` also uses accessory activation policy.
+- `AppDelegate` is the UI and lifecycle coordinator, strictly constrained to the main thread with `MainThreadMarker` / `MainThreadOnly`.
+- `PowerController` is generic over `AssertionProvider` (RAII handle drop semantics) and manages active session timestamps and display mode.
+- `UiProjection` computes UI presentation state purely and deterministically from model state.
+- Unsafe code is strictly forbidden in `melaffeine-core` and isolated to narrow, documented Apple framework adapters in `melaffeine-app`.
+- No `Arc<Mutex<_>>`, no async runtime, no thread pools. Main run loop timers (`NSTimer`) handle finite expiry and countdown ticks.
+- No persisted runtime state. Active sessions die with the process.
 
 ## Key Directories
 
 ```text
-Sources/   Objective-C source files
-Tests/     tiny Objective-C test runners
-*.app/     generated local app bundle artifact, ignored by git
+crates/melaffeine-core/  Pure Rust duration domain logic and unit tests
+crates/melaffeine-app/   Native macOS AppKit application, IOKit adapters, UI, and integration tests
+Resources/               Checked-in Info.plist and app bundle metadata
+nix/parts/               Modular flake parts (packages, checks, dev shell, toolchain, formatting)
 ```
 
 ## Development Commands
@@ -46,76 +53,75 @@ Tests/     tiny Objective-C test runners
 From repo root:
 
 ```sh
-just build                   # build/package app bundle
-just test                    # compile and run tiny duration logic tests
-just run                     # build and launch
+just build                   # build release app bundle and ad-hoc sign
+just test                    # run workspace tests via cargo-nextest
+just run                     # build and launch Melaffeine.app
 just open                    # open existing Melaffeine.app
-just clean                   # remove generated app/test artifacts
-nix develop                  # enter pinned dev shell with just/clang tools
-nix build                    # build default Nix package: melaffeine
+just clean                   # remove target, result, and generated bundle artifacts
+just check                   # run clippy, tests, and formatting checks
+nix develop                  # enter pinned dev shell with Rust/Cargo/just/Nix tools
+nix flake check              # run all Nix flake checks (crane checks, clippy, nextest, treefmt)
+nix build                    # build default Nix package: Melaffeine.app
 ```
 
 ## Code Conventions & Common Patterns
 
-- Objective-C with ARC: `clang -Os -fobjc-arc`.
-- Programmatic AppKit only. No XIB/storyboard.
-- Constants:
-  - UI strings: `CTTitleStart`, `CTTitleRunIndefinitely`, etc.
-  - layout values: `CTMenuWidth`, `CTMenuPadding`, etc.
-  - time values and duration-domain constants: `Duration.h/.m`.
-  - `justfile` recipes use POSIX `/bin/sh` and `printf`; do not add Bash-only syntax.
-  - `justfile` intentionally must not invoke `nix`; enter `nix develop` first when reproducible tooling is needed.
-  - Source autodiscovery convention: app `.m` files live in `Sources/`, tests live in `Tests/`; do not put scratch `.m` files in `Sources/`.
+- Rust 2024 edition, workspace resolver 2.
+- Strict lints: workspace-level `rust.lints` and `clippy.lints` with warnings denied in CI/checks; test exemptions configured in `clippy.toml`.
+- Objective-C Runtime bindings:
+  - Modern `objc2` ecosystem (`objc2`, `objc2-foundation`, `objc2-app-kit`, `objc2-io-kit`, `objc2-service-management`, `objc2-core-foundation`).
+  - Do not introduce obsolete crates (`cocoa`, `objc`, `objc-foundation`, `objc-id`, `io-kit-sys`).
+  - Use `MainThreadMarker` / `MainThreadOnly` for all AppKit UI interactions.
+  - Retain cycles prevented via `Weak` delegate references in event monitor / timer block callbacks.
 - State sync:
-  - Do not read UI as source of truth except control values at Start time.
-  - `PowerController.active` determines Start/Stop and status icon state.
-  - Timer expiry must notify UI through `PowerControllerDidChangeNotification`.
-  - Finite countdown UI is derived from `PowerController.endsAt`; do not run its UI timer while the popover is closed, inactive, or indefinite.
-  - Duration input must parse as strict positive integer text and must not exceed `CTMaximumFiniteDurationSeconds`; do not rely on `NSTextField.doubleValue`.
-  - Duration parsing, unit conversion, and compact countdown formatting belong in `Duration.m`, not `AppDelegate.m`.
+  - Do not read UI as source of truth except user inputs at Start time.
+  - `PowerController.is_active()` determines Start/Stop title and status icon state (`cup.and.saucer` vs `cup.and.saucer.fill`).
+  - Timer expiry stops `PowerController` and triggers UI projection update.
+  - Finite countdown text is derived from `PowerController.ends_at()` and Foundation localized time; UI timer only runs while popover is open for an active finite session.
+  - Duration input must parse strictly through `melaffeine_core::parse_duration` (checked positive integer, max 365 days / 525,600 minutes).
 - Error handling:
-  - `PowerController` returns `BOOL` + `NSError **` for assertion creation failure.
-  - UI displays errors through `errorLabel`.
+  - `PowerController` returns `Result<(), PowerError>`.
+  - UI displays errors inline through the red error label.
 - Resource cleanup:
-  - Always release IOKit assertions in `PowerController -stop` and `-dealloc`.
-  - Always remove global event monitors when popover closes.
+  - `IOKitAssertion` releases `IOPMAssertionID` on `Drop`.
+  - Popover close removes global event monitors and invalidates countdown timer.
+  - App termination cleans up assertions and invalidates timers.
 
 ## Important Files
 
 ```text
-Sources/main.m              app entry point
-Sources/AppDelegate.m       status item, popover UI, launch-at-login, state sync
-Sources/PowerController.m   IOKit assertion lifecycle and timer expiry
-Sources/Duration.m          strict duration parsing/conversion/formatting
-Sources/Constants.m         strings, layout constants, time constants
-Tests/DurationTests.m       tiny no-Xcode duration behavior test runner
-justfile                    primary command runner
-flake.nix                   pinned Nix dev shell
-nix/flake/                  modular package/devShell/formatter definitions
-flake.lock                  pinned Nix input lock
-project.env                 APP_NAME/BUNDLE_ID/MACOS_MIN_VERSION
-README.md                   high-signal user/build notes
+Cargo.toml                               Workspace manifest & lint configuration
+clippy.toml                              Clippy configuration
+crates/melaffeine-core/src/lib.rs        Core domain entry point
+crates/melaffeine-core/src/duration.rs   Duration parsing and compact formatting
+crates/melaffeine-app/src/main.rs        App entry point & NSApplication bootstrap
+crates/melaffeine-app/src/app_delegate.rs NSApplicationDelegate & AppKit lifecycle
+crates/melaffeine-app/src/ui.rs          Popover UI layout & UiProjection
+crates/melaffeine-app/src/power.rs       PowerController & assertion session model
+crates/melaffeine-app/src/iokit.rs       IOKit IOPMAssertion adapter
+crates/melaffeine-app/src/login.rs       SMAppService login item adapter
+Resources/Info.plist                     Bundle Info.plist definition
+justfile                                 Primary command runner (POSIX /bin/sh)
+flake.nix                                Pinned Nix flake using flake-parts, crane, fenix
+nix/parts/                               Modular Nix flake definitions
 ```
 
 ## Runtime/Tooling Preferences
 
-- Required platform: macOS 14+ currently configured.
-- Required compiler/tooling: Apple Command Line Tools with `codesign` and `open`; `nix develop` provides reproducible `just`, `clang`, and `clang-tools`, and `justfile` auto-loads `project.env`.
-- Build links frameworks: `Cocoa`, `IOKit`, `ServiceManagement`.
-- Signing is local ad-hoc only.
-- No Node/Bun/npm/SwiftPM/Xcode workflow.
-- `project.env` is the script config source of truth.
-- Default Nix package is `packages.<system>.melaffeine`, installed under `$out/Applications/Melaffeine.app`; Nix builds skip host `xattr`/`codesign` by overriding `just` variables.
+- Target platform: macOS 14+ (`MACOSX_DEPLOYMENT_TARGET = "14.0"`).
+- Packaging via Crane and Fenix in Nix flake.
+- Local bundle packaging via `just build` uses `Resources/Info.plist` and ad-hoc codesigning.
+- Testing via `cargo nextest`.
 
 ## Testing & QA
 
-Run the tiny automated tests before smoke checks:
+Run automated workspace tests:
 
 ```sh
 just test
 ```
 
-Required manual/smoke checks after changes:
+Manual smoke checks after changes:
 
 ```sh
 just build
@@ -126,24 +132,15 @@ pkill -x Melaffeine
 
 Functional QA checklist:
 - no Dock icon appears
-- outline cup when off, filled cup when on
-- left-click opens aligned popover
+- outline cup (`cup.and.saucer`) when off, filled cup (`cup.and.saucer.fill`) when on
+- left-click opens aligned 260x174 popover
 - click away closes popover
 - right-click shows Quit with no shortcut hint
 - Start creates assertion and button becomes Stop
 - Stop releases assertion and button becomes Start
 - finite duration auto-stops and UI/icon sync back to off
 - finite active session shows remaining time and stop clock time in the popover
-- finite duration accepts minutes/hours/days, rejects zero, negative, non-numeric, decimal, and excessive values
+- finite duration accepts minutes/hours/days, rejects zero, negative, non-numeric, decimal, and excessive values (>365 days)
 - indefinite mode does not persist across relaunch
 - Launch at Login checkbox reflects `SMAppService` state
-
-Optional system-level assertion check:
-
-```sh
-pmset -g assertions
-```
-
-Performance expectation:
-- idle CPU should be effectively zero
-- app bundle should stay around ~100 KB unless new dependencies are added
+- `pmset -g assertions` confirms `PreventUserIdleSystemSleep` / `PreventUserIdleDisplaySleep`
