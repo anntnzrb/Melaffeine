@@ -14,9 +14,10 @@ User-facing behavior:
 - no persisted active state after quit/reboot
 
 ## Architecture & Data Flow
-Melaffeine is structured as a two-crate Cargo workspace:
-- `crates/app-core`: Pure domain logic with `#![forbid(unsafe_code)]`. Contains duration parsing (`DurationUnit`, `parse_duration`) and compact minute formatting (`format_compact_duration`).
-- `crates/app`: Native macOS AppKit application binary (`Melaffeine`). Contains the `NSApplicationDelegate` lifecycle, UI view construction, `UiProjection` state modeling, `PowerController` assertion management, and Apple framework adapters (`IOKitProvider`).
+Melaffeine is structured as a three-crate Cargo workspace:
+- `crates/app-core`: Pure domain logic with `#![forbid(unsafe_code)]`. Contains duration parsing (`DurationUnit`, `parse_duration`), compact minute formatting (`format_compact_duration`), and shared IPC protocol types (`IpcCommand`, `IpcResponse`).
+- `crates/app`: Native macOS AppKit application binary (`Melaffeine`). Contains the `NSApplicationDelegate` lifecycle, UI view construction, `UiProjection` state modeling, `PowerController` assertion management, Apple framework adapters (`IOKitProvider`), and the Unix socket IPC server.
+- `crates/cli`: Command-line controller binary (`melaffeine`) powered by `clap`. Connects to the running AppKit app via Unix domain socket.
 
 High-level flow:
 
@@ -42,6 +43,7 @@ Key patterns:
 ```text
 crates/app-core/         Pure Rust duration domain logic and unit tests
 crates/app/              Native macOS AppKit application, IOKit adapters, UI, and integration tests
+crates/cli/              CLI controller binary (melaffeine) powered by clap
 Resources/               Checked-in Info.plist and app bundle metadata
 nix/parts/               Modular flake parts (packages, checks, dev shell, toolchain, formatting)
 ```
@@ -60,6 +62,7 @@ just test                    # run workspace tests via cargo-nextest
 just coverage                # run workspace code coverage via cargo-llvm-cov
 just format                  # format project sources via nix fmt
 just run                     # build debug app bundle and launch Melaffeine.app
+just cli [ARGS]             # run CLI controller (e.g. just cli start 2h, just cli status)
 just clean                   # remove target, result, and generated bundle artifacts
 ```
 
