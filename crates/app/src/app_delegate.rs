@@ -413,16 +413,6 @@ impl AppDelegate {
         Ok(())
     }
 
-    /// Polls incoming IPC connections from the Unix Domain Socket server.
-    pub fn poll_ipc_connections(&self) {
-        let state_opt = self.ivars().borrow();
-        let Some(state) = state_opt.as_ref() else {
-            return;
-        };
-        if let Some(server) = &state.ipc_server {
-            server.poll_connections(self);
-        }
-    }
 
     /// Executes an incoming IPC command and generates a structured response.
     #[allow(clippy::option_if_let_else)]
@@ -487,15 +477,26 @@ impl AppDelegate {
                 Err(e) => IpcResponse::Err(e),
             },
             IpcCommand::Quit => {
-                self.teardown();
-                let mtm = MainThreadMarker::from(self);
-                let app = NSApplication::sharedApplication(mtm);
-                app.terminate(None);
+                let weak_self: Weak<Self> = Weak::from_retained(&Retained::from(self));
+                let block = RcBlock::new(move |_timer: NonNull<NSTimer>| {
+                    if let Some(strong_self) = weak_self.load() {
+                        strong_self.teardown();
+                        let mtm = MainThreadMarker::from(&*strong_self);
+                        let app = NSApplication::sharedApplication(mtm);
+                        app.terminate(None);
+                    }
+                });
+                let _ = unsafe {
+                    NSTimer::scheduledTimerWithTimeInterval_repeats_block(
+                        0.05,
+                        false,
+                        &block,
+                    )
+                };
                 IpcResponse::Ok(String::from("Terminating"))
             }
         }
     }
-
 
     /// Stops power assertion and invalidates expiry timer.
     pub fn stop_power_and_expiry(&self) {
@@ -555,6 +556,14 @@ impl AppDelegate {
         } else {
             state.time_label.setStringValue(&NSString::from_str(""));
             state.time_label.setHidden(true);
+        }
+        if !active
+            && let Some(conflict_app) = crate::conflicts::detect_external_conflict()
+        {
+            state.error_label.setStringValue(&NSString::from_str(&format!(
+                "Note: {conflict_app} is also running."
+            )));
+            state.error_label.setHidden(false);
         }
 
         let symbol_name = if active { ICON_ACTIVE } else { ICON_INACTIVE };

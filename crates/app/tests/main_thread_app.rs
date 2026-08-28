@@ -206,7 +206,6 @@ fn main() {
     let stop_resp = delegate.execute_ipc_command(&IpcCommand::Stop);
     assert!(matches!(stop_resp, IpcResponse::Ok(_)));
 
-    delegate.poll_ipc_connections();
 
     // 4. Test IOKitProvider
     let provider = IOKitProvider;

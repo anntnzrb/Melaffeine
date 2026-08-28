@@ -5,6 +5,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::ptr::NonNull;
+use std::rc::Rc;
 
 use app_core::ipc::{IpcCommand, socket_path};
 use block2::RcBlock;
@@ -18,7 +19,7 @@ const IPC_POLL_INTERVAL_SECS: f64 = 0.05;
 
 /// Active Unix Domain Socket IPC server.
 pub struct IpcServer {
-    listener: UnixListener,
+    _listener: Rc<UnixListener>,
     path: PathBuf,
     timer: Option<Retained<NSTimer>>,
 }
@@ -37,10 +38,14 @@ impl IpcServer {
             return None;
         }
 
+        let listener_rc = Rc::new(listener);
+        let listener_clone = Rc::clone(&listener_rc);
         let weak_delegate: Weak<AppDelegate> = Weak::from_retained(&Retained::from(delegate));
         let block = RcBlock::new(move |_timer: NonNull<NSTimer>| {
-            if let Some(strong_delegate) = weak_delegate.load() {
-                strong_delegate.poll_ipc_connections();
+            while let Ok((stream, _)) = listener_clone.accept() {
+                if let Some(strong_delegate) = weak_delegate.load() {
+                    Self::handle_connection(stream, &strong_delegate);
+                }
             }
         });
 
@@ -54,17 +59,10 @@ impl IpcServer {
         };
 
         Some(Self {
-            listener,
+            _listener: listener_rc,
             path,
             timer: Some(timer),
         })
-    }
-
-    /// Accepts all pending non-blocking connections and processes commands.
-    pub fn poll_connections(&self, delegate: &AppDelegate) {
-        while let Ok((stream, _)) = self.listener.accept() {
-            Self::handle_connection(stream, delegate);
-        }
     }
 
     fn handle_connection(mut stream: UnixStream, delegate: &AppDelegate) {
