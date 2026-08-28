@@ -188,6 +188,14 @@ impl AppDelegate {
                 .duration_field
                 .setAction(Some(sel!(controlChanged:)));
 
+            controls.unit_popup.setTarget(Some(self));
+            controls.unit_popup.setAction(Some(sel!(controlChanged:)));
+
+            controls.keep_display_awake_button.setTarget(Some(self));
+            controls
+                .keep_display_awake_button
+                .setAction(Some(sel!(controlChanged:)));
+
             controls.start_stop_button.setTarget(Some(self));
             controls
                 .start_stop_button
