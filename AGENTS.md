@@ -35,33 +35,34 @@ Key patterns:
 - `AppDelegate` is the UI and lifecycle coordinator, strictly constrained to the main thread with `MainThreadMarker` / `MainThreadOnly`.
 - `PowerController` is generic over `AssertionProvider` (RAII handle drop semantics) and manages active session timestamps and display mode.
 - `UiProjection` computes UI presentation state purely and deterministically from model state.
-- Unsafe code is strictly forbidden in `melaffeine-core` and isolated to narrow, documented Apple framework adapters in `melaffeine-app`.
+- Unsafe code is strictly forbidden in `app-core` and isolated to narrow, documented Apple framework adapters in `app`.
 - No `Arc<Mutex<_>>`, no async runtime, no thread pools. Main run loop timers (`NSTimer`) handle finite expiry and countdown ticks.
 - No persisted runtime state. Active sessions die with the process.
 
 ## Key Directories
 
 ```text
-crates/melaffeine-core/  Pure Rust duration domain logic and unit tests
-crates/melaffeine-app/   Native macOS AppKit application, IOKit adapters, UI, and integration tests
+crates/app-core/         Pure Rust duration domain logic and unit tests
+crates/app/              Native macOS AppKit application, IOKit adapters, UI, and integration tests
 Resources/               Checked-in Info.plist and app bundle metadata
 nix/parts/               Modular flake parts (packages, checks, dev shell, toolchain, formatting)
 ```
 
 ## Development Commands
 
+Do not invoke `cargo`, `rustc`, or `nix` directly; always use `just` recipes within the dev environment (`nix develop`).
+
 From repo root:
 
 ```sh
+just                         # show interactive menu of available recipes
 just build                   # build release app bundle and ad-hoc sign
-just test                    # run workspace tests via cargo-nextest
-just run                     # build and launch Melaffeine.app
-just open                    # open existing Melaffeine.app
-just clean                   # remove target, result, and generated bundle artifacts
 just check                   # run clippy, tests, and formatting checks
-nix develop                  # enter pinned dev shell with Rust/Cargo/just/Nix tools
-nix flake check              # run all Nix flake checks (crane checks, clippy, nextest, treefmt)
-nix build                    # build default Nix package: Melaffeine.app
+just test                    # run workspace tests via cargo-nextest
+just coverage                # run workspace code coverage via cargo-llvm-cov
+just format                  # format project sources via nix fmt
+just run                     # build debug app bundle and launch Melaffeine.app
+just clean                   # remove target, result, and generated bundle artifacts
 ```
 
 ## Code Conventions & Common Patterns
@@ -78,7 +79,7 @@ nix build                    # build default Nix package: Melaffeine.app
   - `PowerController.is_active()` determines Start/Stop title and status icon state (`cup.and.saucer` vs `cup.and.saucer.fill`).
   - Timer expiry stops `PowerController` and triggers UI projection update.
   - Finite countdown text is derived from `PowerController.ends_at()` and Foundation localized time; UI timer only runs while popover is open for an active finite session.
-  - Duration input must parse strictly through `melaffeine_core::parse_duration` (checked positive integer, max 365 days / 525,600 minutes).
+  - Duration input must parse strictly through `app_core::parse_duration` (checked positive integer, max 365 days / 525,600 minutes).
 - Error handling:
   - `PowerController` returns `Result<(), PowerError>`.
   - UI displays errors inline through the red error label.
@@ -92,14 +93,14 @@ nix build                    # build default Nix package: Melaffeine.app
 ```text
 Cargo.toml                               Workspace manifest & lint configuration
 clippy.toml                              Clippy configuration
-crates/melaffeine-core/src/lib.rs        Core domain entry point
-crates/melaffeine-core/src/duration.rs   Duration parsing and compact formatting
-crates/melaffeine-app/src/main.rs        App entry point & NSApplication bootstrap
-crates/melaffeine-app/src/app_delegate.rs NSApplicationDelegate & AppKit lifecycle
-crates/melaffeine-app/src/ui.rs          Popover UI layout & UiProjection
-crates/melaffeine-app/src/power.rs       PowerController & assertion session model
-crates/melaffeine-app/src/iokit.rs       IOKit IOPMAssertion adapter
-crates/melaffeine-app/src/login.rs       SMAppService login item adapter
+crates/app-core/src/lib.rs               Core domain entry point
+crates/app-core/src/duration.rs          Duration parsing and compact formatting
+crates/app/src/main.rs                   App entry point & NSApplication bootstrap
+crates/app/src/app_delegate.rs           NSApplicationDelegate & AppKit lifecycle
+crates/app/src/ui.rs                     Popover UI layout & UiProjection
+crates/app/src/power.rs                  PowerController & assertion session model
+crates/app/src/iokit.rs                  IOKit IOPMAssertion adapter
+crates/app/src/login.rs                  SMAppService login item adapter
 Resources/Info.plist                     Bundle Info.plist definition
 justfile                                 Primary command runner (POSIX /bin/sh)
 flake.nix                                Pinned Nix flake using flake-parts, crane, fenix
@@ -115,9 +116,10 @@ nix/parts/                               Modular Nix flake definitions
 
 ## Testing & QA
 
-Run automated workspace tests:
+Run automated workspace tests and checks:
 
 ```sh
+just check
 just test
 ```
 
@@ -125,7 +127,7 @@ Manual smoke checks after changes:
 
 ```sh
 just build
-open Melaffeine.app
+just run
 pgrep -x Melaffeine
 pkill -x Melaffeine
 ```
