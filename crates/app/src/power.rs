@@ -198,8 +198,8 @@ mod tests {
         assert!(controller.keep_display_awake());
         assert_eq!(controller.started_at(), Some(now));
         assert_eq!(controller.ends_at(), Some(now + dur));
-
-        // Replace session
+        let active_dbg = format!("{controller:?}");
+        assert!(active_dbg.contains("PowerController"));
         assert!(controller.start(None, false, now).is_ok());
         assert_eq!(drop_count.load(Ordering::SeqCst), 1);
         assert!(controller.is_active());
@@ -227,6 +227,19 @@ mod tests {
         // Debug formatting
         let debug_repr = format!("{controller:?}");
         assert!(debug_repr.contains("PowerController"));
+    }
+
+    #[test]
+    fn unit_test_iokit_power_controller() {
+        use crate::iokit::IOKitProvider;
+        let mut controller = PowerController::new(IOKitProvider);
+        let dbg = format!("{controller:?}");
+        assert!(dbg.contains("PowerController"));
+        assert!(!controller.is_active());
+        assert!(!controller.keep_display_awake());
+        assert_eq!(controller.started_at(), None);
+        assert_eq!(controller.ends_at(), None);
+        controller.stop();
     }
 
     #[test]
