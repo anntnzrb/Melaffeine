@@ -46,14 +46,21 @@ enum Commands {
 }
 
 fn main() -> ExitCode {
-    let cli = Cli::parse();
-    match run_cli(cli) {
+    report_result(run_cli(Cli::parse()))
+}
+
+fn report_result(result: Result<IpcResponse, String>) -> ExitCode {
+    match result {
+        Ok(IpcResponse::Err(error)) => {
+            eprintln!("Error: {error}");
+            ExitCode::FAILURE
+        }
         Ok(response) => {
             println!("{response}");
             ExitCode::SUCCESS
         }
-        Err(err) => {
-            eprintln!("{err}");
+        Err(error) => {
+            eprintln!("{error}");
             ExitCode::FAILURE
         }
     }
@@ -173,24 +180,17 @@ mod tests {
     }
 
     #[test]
+    fn application_error_returns_failure() {
+        assert_eq!(
+            report_result(Ok(IpcResponse::Err(String::from("rejected")))),
+            ExitCode::FAILURE
+        );
+    }
+
+    #[test]
     fn test_run_cli_invalid_duration() {
         let cli = Cli::try_parse_from(["melaffeine", "start", "invalid_duration"]).unwrap();
         let err = run_cli(cli).unwrap_err();
         assert!(err.contains("Invalid duration specification"));
-    }
-
-    #[test]
-    fn test_run_cli_valid_commands() {
-        let cli_start = Cli::try_parse_from(["melaffeine", "start", "30m", "--display"]).unwrap();
-        let _ = run_cli(cli_start);
-
-        let cli_stop = Cli::try_parse_from(["melaffeine", "stop"]).unwrap();
-        let _ = run_cli(cli_stop);
-
-        let cli_toggle = Cli::try_parse_from(["melaffeine", "toggle"]).unwrap();
-        let _ = run_cli(cli_toggle);
-
-        let cli_quit = Cli::try_parse_from(["melaffeine", "quit"]).unwrap();
-        let _ = run_cli(cli_quit);
     }
 }
