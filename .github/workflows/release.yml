@@ -34,13 +34,15 @@ jobs:
           echo "TAG_NAME=${TAG_NAME}" >> $GITHUB_ENV
           echo "Release version: ${TAG_NAME} (${VERSION})"
 
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+
       - name: Stamp Release Version in Metadata
         run: |
           /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${VERSION}" Resources/Info.plist
           /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${{ github.run_number }}" Resources/Info.plist
-
-      - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@main
+          sed -i '' -E '/^\[workspace.package\]$/,/^\[/ s/^version = ".*"$/version = "'"${VERSION}"'"/' Cargo.toml
+          nix develop -c just refresh-lock
 
       - name: Build Melaffeine.app and CLI via Nix
         run: |
@@ -53,11 +55,13 @@ jobs:
           # Copy standalone CLI binary
           cp result-cli/bin/melaffeine release-artifacts/melaffeine-cli-aarch64-apple-darwin
           chmod +x release-artifacts/melaffeine-cli-aarch64-apple-darwin
+          test "$(release-artifacts/melaffeine-cli-aarch64-apple-darwin --version)" = "melaffeine ${VERSION}"
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.TAG_NAME }}
+          target_commitish: ${{ github.sha }}
           name: Melaffeine ${{ env.TAG_NAME }}
           files: |
             release-artifacts/Melaffeine-aarch64-apple-darwin.zip

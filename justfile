@@ -37,6 +37,10 @@ build:
 test *args:
     cargo nextest run --workspace {{ args }}
 
+[private]
+refresh-lock:
+    cargo metadata --format-version 1 >/dev/null
+
 # run workspace code coverage via cargo-llvm-cov
 coverage *args:
     cargo llvm-cov --workspace {{ args }}
