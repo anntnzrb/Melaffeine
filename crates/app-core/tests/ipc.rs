@@ -1,18 +1,45 @@
 #![allow(
     clippy::unreadable_literal,
     clippy::duration_suboptimal_units,
-    clippy::similar_names
+    clippy::similar_names,
+    clippy::panic_in_result_fn,
+    clippy::too_many_lines
 )]
 
+use std::process::Command;
 use std::time::Duration;
 
 use app_core::ipc::{IpcCommand, IpcResponse, parse_duration_spec, socket_path};
+use rustix::process::geteuid;
 
 #[test]
-fn test_socket_path() {
-    let path = socket_path();
-    assert!(path.to_string_lossy().contains("melaffeine"));
-    assert!(path.to_string_lossy().ends_with(".sock"));
+fn socket_path_uses_os_identity() -> Result<(), Box<dyn std::error::Error>> {
+    let expected = format!("/tmp/melaffeine-{}.sock", geteuid().as_raw());
+    assert_eq!(socket_path().to_string_lossy().into_owned(), expected);
+
+    let executable = std::env::current_exe()?;
+    let output = Command::new(executable)
+        .args(["--exact", "socket_path_reports_child_value", "--nocapture"])
+        .env("UID", "not-the-effective-uid")
+        .env("USER", "not-the-current-user")
+        .env("TMPDIR", "/var/tmp")
+        .output()?;
+    assert!(
+        output.status.success(),
+        "child test process failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let child_stdout = String::from_utf8_lossy(&output.stdout);
+    let child_path = child_stdout
+        .lines()
+        .find_map(|line| line.split_once("SOCKET_PATH=").map(|(_, path)| path));
+    assert_eq!(child_path, Some(expected.as_str()));
+    Ok(())
+}
+
+#[test]
+fn socket_path_reports_child_value() {
+    println!("SOCKET_PATH={}", socket_path().display());
 }
 
 #[test]
@@ -84,10 +111,15 @@ fn test_ipc_command_serialize_and_parse() {
     assert_eq!(IpcCommand::parse("stop\n"), Some(IpcCommand::Stop));
     assert_eq!(IpcCommand::parse("status\n"), Some(IpcCommand::Status));
 
-    // Invalid commands
-    assert_eq!(IpcCommand::parse(""), None);
-    assert_eq!(IpcCommand::parse("UNKNOWN\n"), None);
     assert_eq!(IpcCommand::parse("START invalid\n"), None);
+    assert_eq!(IpcCommand::parse("STOP 1h\n"), None);
+    assert_eq!(IpcCommand::parse("TOGGLE typo\n"), None);
+    assert_eq!(IpcCommand::parse("STATUS typo\n"), None);
+    assert_eq!(IpcCommand::parse("QUIT typo\n"), None);
+    assert_eq!(IpcCommand::parse("START 1h indefinite\n"), None);
+    assert_eq!(IpcCommand::parse("START indefinite 1h\n"), None);
+    assert_eq!(IpcCommand::parse("START 1h 2h\n"), None);
+    assert_eq!(IpcCommand::parse("START display display\n"), None);
 }
 
 #[test]
@@ -148,12 +180,65 @@ fn test_ipc_response_serialize_parse_display() {
     assert_eq!(IpcResponse::parse(""), None);
     assert_eq!(IpcResponse::parse("UNKNOWN response"), None);
     assert_eq!(
-        IpcResponse::parse("STATUS active=invalid ends_at=notanumber remaining=none"),
-        Some(IpcResponse::Status {
-            is_active: false,
-            keep_display_awake: false,
-            ends_at_unix: None,
-            remaining_compact: None,
-        })
+        IpcResponse::parse("STATUS active=invalid display=false ends_at=123 remaining=1h_30m"),
+        None
+    );
+    assert_eq!(
+        IpcResponse::parse("STATUS active=true display=invalid ends_at=123 remaining=1h_30m"),
+        None
+    );
+    assert_eq!(
+        IpcResponse::parse("STATUS active=true display=false ends_at=notanumber remaining=none"),
+        None
+    );
+
+    // Missing required status fields
+    assert_eq!(
+        IpcResponse::parse("STATUS display=false ends_at=123 remaining=1h_30m"),
+        None
+    );
+    assert_eq!(
+        IpcResponse::parse("STATUS active=true ends_at=123 remaining=1h_30m"),
+        None
+    );
+    assert_eq!(
+        IpcResponse::parse("STATUS active=true display=false remaining=1h_30m"),
+        None
+    );
+    assert_eq!(
+        IpcResponse::parse("STATUS active=true display=false ends_at=123"),
+        None
+    );
+
+    // Duplicate status fields
+    assert_eq!(
+        IpcResponse::parse(
+            "STATUS active=true active=false display=false ends_at=123 remaining=none"
+        ),
+        None
+    );
+    assert_eq!(
+        IpcResponse::parse(
+            "STATUS active=true display=false display=true ends_at=123 remaining=none"
+        ),
+        None
+    );
+    assert_eq!(
+        IpcResponse::parse(
+            "STATUS active=true display=false ends_at=123 ends_at=456 remaining=none"
+        ),
+        None
+    );
+    assert_eq!(
+        IpcResponse::parse(
+            "STATUS active=true display=false ends_at=123 remaining=none remaining=1h"
+        ),
+        None
+    );
+    assert_eq!(
+        IpcResponse::parse(
+            "STATUS active=true display=false ends_at=123 remaining=none unexpected=value"
+        ),
+        None
     );
 }

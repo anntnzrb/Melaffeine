@@ -12,10 +12,10 @@ pub const SOCKET_NAME_PREFIX: &str = "melaffeine";
 /// Computes the default Unix Domain Socket path for the current user.
 #[must_use]
 pub fn socket_path() -> PathBuf {
-    let uid = std::env::var("UID")
-        .unwrap_or_else(|_| std::env::var("USER").unwrap_or_else(|_| String::from("default")));
-    let tmp = std::env::temp_dir();
-    tmp.join(format!("{SOCKET_NAME_PREFIX}-{uid}.sock"))
+    PathBuf::from("/tmp").join(format!(
+        "{SOCKET_NAME_PREFIX}-{}.sock",
+        rustix::process::geteuid().as_raw()
+    ))
 }
 
 /// Commands sent from the CLI client to the running application.
@@ -81,25 +81,36 @@ impl IpcCommand {
         let mut parts = trimmed.split_whitespace();
         let action = parts.next()?;
 
-        if action.eq_ignore_ascii_case("STOP") {
+        if action.eq_ignore_ascii_case("STOP") && parts.next().is_none() {
             Some(Self::Stop)
-        } else if action.eq_ignore_ascii_case("TOGGLE") {
+        } else if action.eq_ignore_ascii_case("TOGGLE") && parts.next().is_none() {
             Some(Self::Toggle)
-        } else if action.eq_ignore_ascii_case("STATUS") {
+        } else if action.eq_ignore_ascii_case("STATUS") && parts.next().is_none() {
             Some(Self::Status)
-        } else if action.eq_ignore_ascii_case("QUIT") {
+        } else if action.eq_ignore_ascii_case("QUIT") && parts.next().is_none() {
             Some(Self::Quit)
         } else if action.eq_ignore_ascii_case("START") {
             let mut duration: Option<Duration> = None;
+            let mut duration_seen = false;
             let mut keep_display_awake = false;
 
             for part in parts {
                 if part.eq_ignore_ascii_case("display") {
+                    if keep_display_awake {
+                        return None;
+                    }
                     keep_display_awake = true;
                 } else if part.eq_ignore_ascii_case("indefinite") {
-                    duration = None;
-                } else if let Some(dur) = parse_duration_spec(part) {
-                    duration = Some(dur);
+                    if duration_seen {
+                        return None;
+                    }
+                    duration_seen = true;
+                } else if let Some(parsed) = parse_duration_spec(part) {
+                    if duration_seen {
+                        return None;
+                    }
+                    duration_seen = true;
+                    duration = Some(parsed);
                 } else {
                     return None;
                 }
@@ -202,7 +213,11 @@ impl IpcResponse {
 
     /// Parses an incoming protocol line into an `IpcResponse`.
     #[must_use]
-    #[allow(clippy::option_if_let_else, clippy::collapsible_if)]
+    #[allow(
+        clippy::option_if_let_else,
+        clippy::collapsible_if,
+        clippy::question_mark
+    )]
     pub fn parse(line: &str) -> Option<Self> {
         let trimmed = line.trim();
         if let Some(rest) = trimmed.strip_prefix("OK ") {
@@ -210,32 +225,50 @@ impl IpcResponse {
         } else if let Some(rest) = trimmed.strip_prefix("ERR ") {
             Some(Self::Err(rest.to_string()))
         } else if let Some(rest) = trimmed.strip_prefix("STATUS ") {
-            let mut is_active = false;
-            let mut keep_display_awake = false;
-            let mut ends_at_unix: Option<u64> = None;
-            let mut remaining_compact: Option<String> = None;
+            let mut is_active: Option<bool> = None;
+            let mut keep_display_awake: Option<bool> = None;
+            let mut ends_at_unix: Option<Option<u64>> = None;
+            let mut remaining_compact: Option<Option<String>> = None;
 
             for part in rest.split_whitespace() {
-                if let Some(v) = part.strip_prefix("active=") {
-                    is_active = v.eq_ignore_ascii_case("true");
-                } else if let Some(v) = part.strip_prefix("display=") {
-                    keep_display_awake = v.eq_ignore_ascii_case("true");
-                } else if let Some(v) = part.strip_prefix("ends_at=") {
-                    if v != "none" {
-                        ends_at_unix = v.parse::<u64>().ok();
+                if let Some(value) = part.strip_prefix("active=") {
+                    let value = value.parse::<bool>().ok()?;
+                    if is_active.replace(value).is_some() {
+                        return None;
                     }
-                } else if let Some(v) = part.strip_prefix("remaining=") {
-                    if v != "none" {
-                        remaining_compact = Some(v.replace('_', " "));
+                } else if let Some(value) = part.strip_prefix("display=") {
+                    let value = value.parse::<bool>().ok()?;
+                    if keep_display_awake.replace(value).is_some() {
+                        return None;
                     }
+                } else if let Some(value) = part.strip_prefix("ends_at=") {
+                    let value = if value == "none" {
+                        None
+                    } else {
+                        Some(value.parse::<u64>().ok()?)
+                    };
+                    if ends_at_unix.replace(value).is_some() {
+                        return None;
+                    }
+                } else if let Some(value) = part.strip_prefix("remaining=") {
+                    let value = if value == "none" {
+                        None
+                    } else {
+                        Some(value.replace('_', " "))
+                    };
+                    if remaining_compact.replace(value).is_some() {
+                        return None;
+                    }
+                } else {
+                    return None;
                 }
             }
 
             Some(Self::Status {
-                is_active,
-                keep_display_awake,
-                ends_at_unix,
-                remaining_compact,
+                is_active: is_active?,
+                keep_display_awake: keep_display_awake?,
+                ends_at_unix: ends_at_unix?,
+                remaining_compact: remaining_compact?,
             })
         } else {
             None
