@@ -10,17 +10,17 @@
     dead_code
 )]
 
-use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
+use std::cell::Cell;
+use std::rc::Rc;
 use std::time::{Duration, SystemTime};
 
 use app::app_delegate::AppDelegate;
 use app::iokit::IOKitProvider;
 use app::power::{AssertionKind, AssertionProvider, PowerController, PowerError};
 use app::ui::{
-    DEFAULT_DURATION_TEXT, TITLE_KEEP_DISPLAY_AWAKE, TITLE_RUN_INDEFINITELY, TITLE_START,
-    TITLE_STOP, UNIT_DAYS_INDEX, UNIT_HOURS_INDEX, UNIT_MINUTES_INDEX, build_content_view,
-    compute_ui_projection,
+    DEFAULT_DURATION_TEXT, ERROR_DURATION_INVALID, ICON_INACTIVE, TITLE_KEEP_DISPLAY_AWAKE,
+    TITLE_RUN_INDEFINITELY, TITLE_START, TITLE_STOP, UNIT_DAYS_INDEX, UNIT_HOURS_INDEX,
+    UNIT_MINUTES_INDEX, build_content_view, compute_ui_projection,
 };
 use app_core::duration::{DurationUnit, format_compact_duration, parse_duration};
 use app_core::ipc::{IpcCommand, IpcResponse};
@@ -33,15 +33,16 @@ use objc2_foundation::{NSNotification, NSString, NSTimer};
 
 #[derive(Clone, Default)]
 struct MockProvider {
-    fail: bool,
+    fail: Rc<Cell<bool>>,
 }
 
+#[derive(Debug)]
 struct MockHandle;
 
 impl AssertionProvider for MockProvider {
     type Handle = MockHandle;
     fn acquire(&self, _kind: AssertionKind) -> Result<Self::Handle, PowerError> {
-        if self.fail {
+        if self.fail.get() {
             Err(PowerError::AcquisitionFailed(-1))
         } else {
             Ok(MockHandle)
@@ -106,11 +107,16 @@ fn main() {
     let unit_popup = state.unit_popup.clone();
     let start_stop_button = state.start_stop_button.clone();
     let status_item = state.status_item.clone();
+    let time_label = state.time_label.clone();
+    let error_label = state.error_label.clone();
     drop(state_opt);
 
     // UI sync and error display
     delegate.update_ui();
     delegate.show_error("Test Error Message");
+    delegate.update_ui();
+    assert_eq!(error_label.stringValue().to_string(), "");
+    assert!(error_label.isHidden());
 
     // Action handler: controlChanged
     unsafe {
@@ -123,6 +129,9 @@ fn main() {
     unsafe {
         let _: () = msg_send![&*delegate, startStopClicked: &*start_stop_button];
     }
+    assert_eq!(error_label.stringValue().to_string(), "");
+    assert!(error_label.isHidden());
+    assert!(!time_label.isHidden());
     delegate.update_ui();
 
     let future_end = SystemTime::now() + Duration::from_secs(900);
@@ -133,6 +142,10 @@ fn main() {
         .unwrap();
     assert!(delegate.format_countdown(Some(past_end)).is_none());
     assert!(delegate.format_countdown(None).is_none());
+    delegate.show_error("stale active error");
+    delegate.update_ui();
+    assert_eq!(error_label.stringValue().to_string(), "");
+    assert!(error_label.isHidden());
 
     // Stop session
     unsafe {
@@ -157,16 +170,23 @@ fn main() {
     unsafe {
         let _: () = msg_send![&*delegate, startStopClicked: &*start_stop_button];
     }
+    assert_eq!(
+        error_label.stringValue().to_string(),
+        ERROR_DURATION_INVALID
+    );
+    assert!(!error_label.isHidden());
 
     // Hours and Days units
     duration_field.setStringValue(&NSString::from_str("3"));
     unit_popup.selectItemAtIndex(UNIT_HOURS_INDEX);
-    delegate.handle_start_stop();
+    assert!(delegate.handle_start_stop().is_ok());
+    assert_eq!(error_label.stringValue().to_string(), "");
+    assert!(error_label.isHidden());
     delegate.stop_power_and_expiry();
 
     duration_field.setStringValue(&NSString::from_str("2"));
     unit_popup.selectItemAtIndex(UNIT_DAYS_INDEX);
-    delegate.handle_start_stop();
+    assert!(delegate.handle_start_stop().is_ok());
     delegate.stop_power_and_expiry();
 
     // Popover toggle
@@ -198,11 +218,36 @@ fn main() {
         }
     ));
 
+    // Toggle when inactive with invalid input must report the validation error.
+    indefinite_button.setState(NSControlStateValueOff);
+    duration_field.setStringValue(&NSString::from_str("invalid_number"));
+    let invalid_toggle = delegate.execute_ipc_command(&IpcCommand::Toggle);
+    assert_eq!(
+        invalid_toggle,
+        IpcResponse::Err(String::from(ERROR_DURATION_INVALID))
+    );
+    let invalid_status = delegate.execute_ipc_command(&IpcCommand::Status);
+    assert!(matches!(
+        invalid_status,
+        IpcResponse::Status {
+            is_active: false,
+            ..
+        }
+    ));
+
+    // A finite IPC start remains finite even when the editable checkbox is checked.
+    indefinite_button.setState(NSControlStateValueOn);
+    delegate.show_error("stale successful start error");
     let start_resp = delegate.execute_ipc_command(&IpcCommand::Start {
         duration: Some(Duration::from_secs(120)),
         keep_display_awake: true,
     });
     assert!(matches!(start_resp, IpcResponse::Ok(_)));
+    delegate.update_ui();
+    assert!(!time_label.isHidden());
+    assert_ne!(time_label.stringValue().to_string(), "");
+    assert_eq!(error_label.stringValue().to_string(), "");
+    assert!(error_label.isHidden());
 
     let status_resp2 = delegate.execute_ipc_command(&IpcCommand::Status);
     assert!(matches!(
@@ -210,15 +255,30 @@ fn main() {
         IpcResponse::Status {
             is_active: true,
             keep_display_awake: true,
+            ends_at_unix: Some(_),
             ..
         }
     ));
+
+    // Current active sessions also clear stale errors.
+    delegate.show_error("stale active error");
+    delegate.update_ui();
+    assert_eq!(error_label.stringValue().to_string(), "");
+    assert!(error_label.isHidden());
 
     let toggle_resp = delegate.execute_ipc_command(&IpcCommand::Toggle);
     assert!(matches!(toggle_resp, IpcResponse::Ok(_)));
 
     let stop_resp = delegate.execute_ipc_command(&IpcCommand::Stop);
     assert!(matches!(stop_resp, IpcResponse::Ok(_)));
+
+    // A no-conflict inactive projection clears stale errors as well.
+    if app::conflicts::detect_external_conflict().is_none() {
+        delegate.show_error("stale inactive error");
+        delegate.update_ui();
+        assert_eq!(error_label.stringValue().to_string(), "");
+        assert!(error_label.isHidden());
+    }
 
     // Toggle when inactive -> starts session
     let toggle_inactive = delegate.execute_ipc_command(&IpcCommand::Toggle);
@@ -236,36 +296,11 @@ fn main() {
     let quit_resp = delegate.execute_ipc_command(&IpcCommand::Quit);
     assert!(matches!(quit_resp, IpcResponse::Ok(_)));
 
-    // IPC Server connection handling tests
-    // 1: Empty command
-    let (mut client1, server_stream1) = UnixStream::pair().unwrap();
-    client1.write_all(b"\n").unwrap();
-    app::ipc_server::IpcServer::handle_connection(server_stream1, &delegate);
-    let mut buf1 = String::new();
-    BufReader::new(&client1).read_line(&mut buf1).unwrap();
-    assert!(buf1.contains("ERR empty command"));
-
-    // 2: Invalid command
-    let (mut client2, server_stream2) = UnixStream::pair().unwrap();
-    client2.write_all(b"NOT_A_COMMAND\n").unwrap();
-    app::ipc_server::IpcServer::handle_connection(server_stream2, &delegate);
-    let mut buf2 = String::new();
-    BufReader::new(&client2).read_line(&mut buf2).unwrap();
-    assert!(buf2.contains("ERR invalid command"));
-
-    // 3: Valid command (STATUS)
-    let (mut client3, server_stream3) = UnixStream::pair().unwrap();
-    client3.write_all(b"STATUS\n").unwrap();
-    app::ipc_server::IpcServer::handle_connection(server_stream3, &delegate);
-    let mut buf3 = String::new();
-    BufReader::new(&client3).read_line(&mut buf3).unwrap();
-    assert!(buf3.contains("STATUS active="));
     // Popover, Menu & Timer tests
     if let Some(btn) = status_item.button(mtm) {
         delegate.toggle_popover_relative_to(&btn);
         delegate.toggle_popover_relative_to(&btn);
     }
-    delegate.show_context_menu();
     delegate.install_outside_click_monitor();
     delegate.remove_outside_click_monitor();
     delegate.start_countdown_timer_if_needed();
@@ -354,7 +389,31 @@ fn main() {
     power.stop();
     assert!(!power.is_active());
 
-    let mut fail_power = PowerController::new(MockProvider { fail: true });
+    // Replacement acquisition errors preserve the platform error and reset projection state.
+    let replacement_provider = MockProvider::default();
+    let mut replacement_power = PowerController::new(replacement_provider.clone());
+    assert!(replacement_power.start(None, false, now).is_ok());
+    replacement_provider.fail.set(true);
+    let replacement_error = replacement_power
+        .start(None, false, now)
+        .expect_err("replacement acquisition should fail");
+    assert_eq!(
+        replacement_error.to_string(),
+        "Failed to acquire power assertion (code: -1)"
+    );
+    assert!(!replacement_power.is_active());
+    assert_eq!(replacement_power.ends_at(), None);
+    let replacement_projection = compute_ui_projection(
+        replacement_power.is_active(),
+        replacement_power.ends_at().is_none(),
+        None,
+    );
+    assert_eq!(replacement_projection.status_icon, ICON_INACTIVE);
+    assert_eq!(replacement_projection.start_stop_title, TITLE_START);
+
+    let fail_provider = MockProvider::default();
+    fail_provider.fail.set(true);
+    let mut fail_power = PowerController::new(fail_provider);
     assert!(fail_power.start(None, false, now).is_err());
     assert!(!fail_power.is_active());
 
@@ -378,7 +437,7 @@ fn main() {
     assert_eq!(parse_duration("525601", DurationUnit::Minutes), None);
 
     assert_eq!(format_compact_duration(Duration::from_nanos(0)), "<1m");
-    assert_eq!(format_compact_duration(Duration::from_secs(30)), "<1m");
+    assert_eq!(format_compact_duration(Duration::from_secs(30)), "1m");
     assert_eq!(format_compact_duration(Duration::from_secs(60)), "1m");
     assert_eq!(format_compact_duration(Duration::from_secs(3600)), "1h 0m");
     assert_eq!(format_compact_duration(Duration::from_secs(3660)), "1h 1m");

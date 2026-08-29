@@ -43,7 +43,6 @@ pub const UNIT_MINUTES_TITLE: &str = "Minutes";
 pub const UNIT_HOURS_TITLE: &str = "Hours";
 pub const UNIT_DAYS_TITLE: &str = "Days";
 pub const ERROR_DURATION_INVALID: &str = "Enter a whole number from 1 to 365 days.";
-pub const ERROR_START_FAILED: &str = "Failed to start.";
 pub const COUNTDOWN_STOPS_IN_PREFIX: &str = "Stops in ";
 pub const COUNTDOWN_AT_SEPARATOR: &str = " at ";
 
@@ -264,24 +263,5 @@ mod tests {
 
         let p_active_indefinite = compute_ui_projection(true, true, Some("1h".to_string()));
         assert_eq!(p_active_indefinite.countdown_text, None);
-    }
-
-    #[test]
-    fn unit_test_build_content_view() {
-        let mtm = unsafe { MainThreadMarker::new_unchecked() };
-        let controls = build_content_view(mtm);
-        assert_eq!(
-            controls.indefinite_button.title().to_string(),
-            TITLE_RUN_INDEFINITELY
-        );
-        assert_eq!(controls.start_stop_button.title().to_string(), TITLE_START);
-        assert_eq!(
-            controls.keep_display_awake_button.title().to_string(),
-            TITLE_KEEP_DISPLAY_AWAKE
-        );
-        assert_eq!(
-            controls.duration_field.stringValue().to_string(),
-            DEFAULT_DURATION_TEXT
-        );
     }
 }

@@ -9,9 +9,9 @@ use crate::ipc_server::IpcServer;
 use crate::power::PowerController;
 use crate::ui::{
     COUNTDOWN_AT_SEPARATOR, COUNTDOWN_STOPS_IN_PREFIX, COUNTDOWN_TIMER_TOLERANCE,
-    COUNTDOWN_UPDATE_INTERVAL, ERROR_DURATION_INVALID, ERROR_START_FAILED, ICON_ACTIVE,
-    ICON_INACTIVE, MENU_HEIGHT, MENU_WIDTH, TITLE_QUIT, UNIT_DAYS_INDEX, UNIT_MINUTES_INDEX,
-    build_content_view, compute_ui_projection,
+    COUNTDOWN_UPDATE_INTERVAL, ERROR_DURATION_INVALID, ICON_ACTIVE, ICON_INACTIVE, MENU_HEIGHT,
+    MENU_WIDTH, TITLE_QUIT, UNIT_DAYS_INDEX, UNIT_MINUTES_INDEX, build_content_view,
+    compute_ui_projection,
 };
 use app_core::duration::{DurationUnit, format_compact_duration, parse_duration};
 use app_core::ipc::{IpcCommand, IpcResponse};
@@ -115,7 +115,9 @@ define_class!(
         /// Handles clicks on the primary Start / Stop button.
         #[unsafe(method(startStopClicked:))]
         fn start_stop_clicked(&self, _sender: &NSButton) {
-            self.handle_start_stop();
+            if let Err(error) = self.handle_start_stop() {
+                self.show_error(&error);
+            }
         }
 
 
@@ -321,22 +323,24 @@ impl AppDelegate {
     }
 
     /// Starts or updates power assertion based on UI inputs.
-    pub fn handle_start_stop(&self) {
+    pub fn handle_start_stop(&self) -> Result<(), String> {
         let is_active = {
             let state_opt = self.ivars().borrow();
-            state_opt.as_ref().is_some_and(|s| s.power.is_active())
+            state_opt
+                .as_ref()
+                .is_some_and(|state| state.power.is_active())
         };
 
         if is_active {
             self.stop_power_and_expiry();
             self.update_ui();
-            return;
+            return Ok(());
         }
 
         let (duration, keep_display) = {
             let state_opt = self.ivars().borrow();
             let Some(state) = state_opt.as_ref() else {
-                return;
+                return Err(String::from("App state not initialized"));
             };
             let indefinite = state.indefinite_button.state() == NSControlStateValueOn;
             let keep_display = state.display_awake_button.state() == NSControlStateValueOn;
@@ -344,30 +348,22 @@ impl AppDelegate {
             if indefinite {
                 (Ok(None), keep_display)
             } else {
-                let input_str = state.duration_field.stringValue().to_string();
+                let input = state.duration_field.stringValue().to_string();
                 let unit = match state.unit_popup.indexOfSelectedItem() {
                     UNIT_MINUTES_INDEX => DurationUnit::Minutes,
                     UNIT_DAYS_INDEX => DurationUnit::Days,
                     _ => DurationUnit::Hours,
                 };
-                parse_duration(&input_str, unit)
-                    .map_or((Err(ERROR_DURATION_INVALID), keep_display), |dur| {
-                        (Ok(Some(dur)), keep_display)
-                    })
+                (
+                    parse_duration(&input, unit)
+                        .map(Some)
+                        .ok_or_else(|| String::from(ERROR_DURATION_INVALID)),
+                    keep_display,
+                )
             }
         };
 
-        let duration_opt = match duration {
-            Ok(dur) => dur,
-            Err(err_msg) => {
-                self.show_error(err_msg);
-                return;
-            }
-        };
-
-        if let Err(err_msg) = self.start_session(duration_opt, keep_display) {
-            self.show_error(&err_msg);
-        }
+        self.start_session(duration?, keep_display)
     }
 
     /// Starts a power assertion session for the specified duration and display setting.
@@ -389,8 +385,10 @@ impl AppDelegate {
         }
 
         let now = SystemTime::now();
-        if let Err(_err) = state.power.start(duration_opt, keep_display, now) {
-            return Err(String::from(ERROR_START_FAILED));
+        if let Err(error) = state.power.start(duration_opt, keep_display, now) {
+            drop(state_opt);
+            self.update_ui();
+            return Err(error.to_string());
         }
 
         if let Some(dur) = duration_opt {
@@ -461,8 +459,10 @@ impl AppDelegate {
                     self.update_ui();
                     IpcResponse::Ok(String::from("Stopped sleep prevention"))
                 } else {
-                    self.handle_start_stop();
-                    IpcResponse::Ok(String::from("Started sleep prevention"))
+                    match self.handle_start_stop() {
+                        Ok(()) => IpcResponse::Ok(String::from("Started sleep prevention")),
+                        Err(error) => IpcResponse::Err(error),
+                    }
                 }
             }
             IpcCommand::Start {
@@ -518,11 +518,14 @@ impl AppDelegate {
             let Some(state) = state_opt.as_ref() else {
                 return;
             };
-            (
-                state.power.is_active(),
-                state.indefinite_button.state() == NSControlStateValueOn,
-                state.power.ends_at(),
-            )
+            let active = state.power.is_active();
+            let ends_at = state.power.ends_at();
+            let indefinite = if active {
+                ends_at.is_none()
+            } else {
+                state.indefinite_button.state() == NSControlStateValueOn
+            };
+            (active, indefinite, ends_at)
         };
 
         let countdown_text = self.format_countdown(ends_at);
@@ -554,6 +557,8 @@ impl AppDelegate {
             state.time_label.setStringValue(&NSString::from_str(""));
             state.time_label.setHidden(true);
         }
+        state.error_label.setStringValue(&NSString::from_str(""));
+        state.error_label.setHidden(true);
         if !active && let Some(conflict_app) = crate::conflicts::detect_external_conflict() {
             state
                 .error_label
