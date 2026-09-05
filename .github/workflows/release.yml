@@ -49,13 +49,27 @@ jobs:
           nix build .#default --out-link result-app
           nix build .#cli --out-link result-cli
 
-          mkdir -p release-artifacts
-          # Package App bundle into zip
-          ditto -c -k --keepParent result-app/Applications/Melaffeine.app release-artifacts/Melaffeine-aarch64-apple-darwin.zip
+          mkdir -p release-artifacts staging
+          # Stage bundle and CLI binary for zip distribution
+          cp -R result-app/Applications/Melaffeine.app staging/
+          cp result-cli/bin/melaffeine staging/melaffeine
+          chmod +x staging/melaffeine
+
+          # Package App bundle + CLI into zip (for Homebrew Cask and manual download)
+          ditto -c -k staging release-artifacts/Melaffeine-aarch64-apple-darwin.zip
+
           # Copy standalone CLI binary
           cp result-cli/bin/melaffeine release-artifacts/melaffeine-cli-aarch64-apple-darwin
           chmod +x release-artifacts/melaffeine-cli-aarch64-apple-darwin
           test "$(release-artifacts/melaffeine-cli-aarch64-apple-darwin --version)" = "melaffeine ${VERSION}"
+
+          # Compute Checksums
+          cd release-artifacts
+          shasum -a 256 Melaffeine-aarch64-apple-darwin.zip > checksums.txt
+          shasum -a 256 melaffeine-cli-aarch64-apple-darwin >> checksums.txt
+          APP_SHA=$(shasum -a 256 Melaffeine-aarch64-apple-darwin.zip | awk '{print $1}')
+          echo "APP_SHA=${APP_SHA}" >> $GITHUB_ENV
+          cd ..
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
@@ -66,5 +80,51 @@ jobs:
           files: |
             release-artifacts/Melaffeine-aarch64-apple-darwin.zip
             release-artifacts/melaffeine-cli-aarch64-apple-darwin
+            release-artifacts/checksums.txt
           generate_release_notes: true
           make_latest: true
+
+      - name: Update Homebrew Tap
+        uses: actions/checkout@v4
+        with:
+          repository: 'anntnzrb/homebrew-tap'
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: 'homebrew-tap'
+
+      - name: Commit & Push Updated Cask to Tap
+        run: |
+          cd homebrew-tap
+          mkdir -p Casks
+
+          cat << 'EOF' > Casks/melaffeine.rb
+          cask "melaffeine" do
+            version "${{ env.VERSION }}"
+            sha256 "${{ env.APP_SHA }}"
+
+            url "https://github.com/anntnzrb/Melaffeine/releases/download/v#{version}/Melaffeine-aarch64-apple-darwin.zip"
+            name "Melaffeine"
+            desc "Tiny native macOS menu-bar utility to prevent sleep"
+            homepage "https://github.com/anntnzrb/Melaffeine"
+
+            depends_on macos: :sonoma
+            depends_on arch: :arm64
+
+            app "Melaffeine.app"
+            binary "melaffeine"
+
+            zap trash: [
+              "~/Library/Caches/Melaffeine",
+              "~/Library/Preferences/Melaffeine.plist",
+            ]
+          end
+          EOF
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Casks/melaffeine.rb
+          if git diff --staged --quiet; then
+            echo "No changes in Cask formula."
+          else
+            git commit -m "melaffeine: bump to ${{ env.TAG_NAME }}"
+            git push origin main
+          fi
