@@ -14,6 +14,16 @@ Tiny native macOS menu-bar utility for keeping the Mac awake.
 - No Dock icon.
 - Full CLI control via `melaffeine` command-line tool (Unix domain socket IPC).
 
+## Installation
+
+Install via Homebrew:
+
+```sh
+brew install --cask anntnzrb/tap/melaffeine
+```
+
+This installs `Melaffeine.app` into `/Applications` and symlinks the `melaffeine` CLI tool into your PATH.
+
 ## Dev Shell
 
 ```sh
