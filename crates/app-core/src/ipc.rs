@@ -4,7 +4,7 @@ use std::fmt;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::duration::{DurationUnit, parse_duration};
+use crate::duration::{DurationUnit, MAX_FINITE_DURATION_SECONDS, parse_duration};
 
 /// Default socket filename prefix.
 pub const SOCKET_NAME_PREFIX: &str = "melaffeine";
@@ -50,6 +50,7 @@ impl IpcCommand {
                 let mut s = String::from("START");
                 if let Some(dur) = duration {
                     let secs = dur.as_secs();
+                    debug_assert!(secs <= MAX_FINITE_DURATION_SECONDS);
                     s.push(' ');
                     s.push_str(&secs.to_string());
                     s.push('s');
@@ -138,6 +139,9 @@ pub fn parse_duration_spec(spec: &str) -> Option<Duration> {
         .strip_suffix('s')
         .or_else(|| trimmed.strip_suffix('S'))
     {
+        if num.is_empty() || !num.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
         let secs = num.parse::<u64>().ok()?;
         if secs == 0 || secs > 31_536_000 {
             return None;
@@ -224,6 +228,10 @@ impl IpcResponse {
             Some(Self::Ok(rest.to_string()))
         } else if let Some(rest) = trimmed.strip_prefix("ERR ") {
             Some(Self::Err(rest.to_string()))
+        } else if trimmed == "OK" {
+            Some(Self::Ok(String::new()))
+        } else if trimmed == "ERR" {
+            Some(Self::Err(String::new()))
         } else if let Some(rest) = trimmed.strip_prefix("STATUS ") {
             let mut is_active: Option<bool> = None;
             let mut keep_display_awake: Option<bool> = None;

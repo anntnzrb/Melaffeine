@@ -60,6 +60,8 @@ fn test_parse_duration_spec() {
     assert_eq!(parse_duration_spec("0h"), None);
     assert_eq!(parse_duration_spec("0d"), None);
     assert_eq!(parse_duration_spec("31536001s"), None);
+    assert_eq!(parse_duration_spec("+30s"), None);
+    assert_eq!(parse_duration_spec("+30m"), None);
     assert_eq!(parse_duration_spec("invalid"), None);
 }
 #[test]
@@ -135,6 +137,16 @@ fn test_ipc_response_serialize_parse_display() {
     assert_eq!(s_err, "ERR Something broke\n");
     assert_eq!(IpcResponse::parse(&s_err), Some(err.clone()));
     assert_eq!(format!("{err}"), "Error: Something broke");
+
+    // Empty messages round-trip via bare "OK"/"ERR" tokens
+    let ok_empty = IpcResponse::Ok(String::new());
+    assert_eq!(IpcResponse::parse(&ok_empty.serialize()), Some(ok_empty));
+    let err_empty = IpcResponse::Err(String::new());
+    assert_eq!(IpcResponse::parse(&err_empty.serialize()), Some(err_empty));
+
+    // Token boundaries: bare prefixes without separator are rejected
+    assert_eq!(IpcResponse::parse("OKAY"), None);
+    assert_eq!(IpcResponse::parse("ERROR"), None);
 
     let status_active = IpcResponse::Status {
         is_active: true,
