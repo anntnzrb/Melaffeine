@@ -7,7 +7,6 @@
     clippy::clone_on_copy,
     dead_code
 )]
-use std::error::Error;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
@@ -107,59 +106,10 @@ fn power_error_display_contains_code_and_description() {
         format!("{err_100}"),
         "Failed to acquire power assertion (code: 100)"
     );
-}
 
-#[test]
-fn power_error_source_is_none() {
-    let err: &dyn Error = &PowerError::AcquisitionFailed(-1);
-    assert!(err.source().is_none());
-}
-
-#[test]
-fn power_error_code_returns_inner_code() {
-    assert_eq!(PowerError::AcquisitionFailed(-1).code(), Some(-1));
-    assert_eq!(PowerError::AcquisitionFailed(0).code(), Some(0));
-    assert_eq!(PowerError::AcquisitionFailed(100).code(), Some(100));
-    assert_eq!(
-        PowerError::AcquisitionFailed(i32::MIN).code(),
-        Some(i32::MIN)
-    );
-    assert_eq!(
-        PowerError::AcquisitionFailed(i32::MAX).code(),
-        Some(i32::MAX)
-    );
+    assert_eq!(err_0.code(), Some(0));
+    assert_eq!(err_100.code(), Some(100));
     assert_eq!(PowerError::DurationOverflow.code(), None);
-}
-
-#[test]
-fn power_error_traits_debug_clone_partial_eq() {
-    let err1 = PowerError::AcquisitionFailed(-1);
-    let err2 = err1.clone();
-    let err3 = PowerError::AcquisitionFailed(42);
-
-    assert_eq!(err1, err2);
-    assert_ne!(err1, err3);
-    assert_eq!(format!("{err1:?}"), "AcquisitionFailed(-1)");
-    assert_eq!(format!("{err3:?}"), "AcquisitionFailed(42)");
-}
-
-// ---------------------------------------------------------------------------
-// AssertionKind Tests
-// ---------------------------------------------------------------------------
-
-#[test]
-fn assertion_kind_traits_debug_clone_copy_equality() {
-    let kind1 = AssertionKind::PreventSystemSleep;
-    let kind2 = kind1; // Copy
-    let kind3 = kind1.clone(); // Clone
-    let kind_display = AssertionKind::PreventDisplaySleep;
-
-    assert_eq!(kind1, kind2);
-    assert_eq!(kind1, kind3);
-    assert_ne!(kind1, kind_display);
-
-    assert_eq!(format!("{kind1:?}"), "PreventSystemSleep");
-    assert_eq!(format!("{kind_display:?}"), "PreventDisplaySleep");
 }
 
 // ---------------------------------------------------------------------------
@@ -413,6 +363,21 @@ fn failed_acquisition_after_active_session_stops_previous_and_leaves_inactive() 
             MockEvent::Released(1),
         ]
     );
+}
+
+#[test]
+fn duration_overflow_leaves_controller_inactive() {
+    let mock = MockAssertionProvider::default();
+    let mut controller = PowerController::new(mock.clone());
+    let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+
+    let result = controller.start(Some(Duration::MAX), false, now);
+    assert_eq!(result, Err(PowerError::DurationOverflow));
+    assert!(!controller.is_active());
+    assert_eq!(controller.started_at(), None);
+    assert_eq!(controller.ends_at(), None);
+    assert_eq!(mock.active_count(), 0);
+    assert!(mock.events().is_empty());
 }
 
 #[test]

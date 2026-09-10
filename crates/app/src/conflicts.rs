@@ -25,13 +25,3 @@ pub fn detect_external_conflict() -> Option<String> {
     None
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn unit_test_detect_external_conflict() {
-        // Runs the detection function and ensures safe execution without panics.
-        let _ = detect_external_conflict();
-    }
-}

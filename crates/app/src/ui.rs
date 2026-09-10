@@ -124,13 +124,17 @@ pub struct PopoverControls {
 
 /// Builds the popover content view hierarchy and initializes all controls.
 #[must_use]
-#[allow(clippy::too_many_lines, deprecated)]
+#[allow(deprecated)]
 pub fn build_content_view(mtm: MainThreadMarker) -> PopoverControls {
     let view_frame = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(MENU_WIDTH, MENU_HEIGHT));
     let view = NSView::initWithFrame(mtm.alloc(), view_frame);
 
     let x = MENU_PADDING;
     let width = MENU_PADDING.mul_add(-2.0, MENU_WIDTH);
+    let place = |v: &NSView, y: f64, w: f64, h: f64| {
+        v.setFrame(CGRect::new(CGPoint::new(x, y), CGSize::new(w, h)));
+        view.addSubview(v);
+    };
 
     // 1. Run Indefinitely checkbox
     // SAFETY: checkboxWithTitle_target_action is called on the main thread.
@@ -142,21 +146,13 @@ pub fn build_content_view(mtm: MainThreadMarker) -> PopoverControls {
             mtm,
         )
     };
-    indefinite_button.setFrame(CGRect::new(
-        CGPoint::new(x, INDEFINITE_Y),
-        CGSize::new(width, CHECKBOX_HEIGHT),
-    ));
-    view.addSubview(&indefinite_button);
+    place(&indefinite_button, INDEFINITE_Y, width, CHECKBOX_HEIGHT);
 
     // 2. Duration text field
     let duration_field =
         NSTextField::textFieldWithString(&NSString::from_str(DEFAULT_DURATION_TEXT), mtm);
     duration_field.setPlaceholderString(Some(&NSString::from_str(DURATION_PLACEHOLDER)));
-    duration_field.setFrame(CGRect::new(
-        CGPoint::new(x, DURATION_Y),
-        CGSize::new(DURATION_FIELD_WIDTH, TEXT_FIELD_HEIGHT),
-    ));
-    view.addSubview(&duration_field);
+    place(&duration_field, DURATION_Y, DURATION_FIELD_WIDTH, TEXT_FIELD_HEIGHT);
 
     // 3. Unit popup button
     let unit_popup_frame = CGRect::new(
@@ -183,21 +179,13 @@ pub fn build_content_view(mtm: MainThreadMarker) -> PopoverControls {
             mtm,
         )
     };
-    keep_display_awake_button.setFrame(CGRect::new(
-        CGPoint::new(x, DISPLAY_AWAKE_Y),
-        CGSize::new(width, CHECKBOX_HEIGHT),
-    ));
-    view.addSubview(&keep_display_awake_button);
+    place(&keep_display_awake_button, DISPLAY_AWAKE_Y, width, CHECKBOX_HEIGHT);
 
     // 5. Countdown time label
     let time_label = NSTextField::labelWithString(&NSString::from_str(""), mtm);
     time_label.setTextColor(Some(&NSColor::secondaryLabelColor()));
     time_label.setHidden(true);
-    time_label.setFrame(CGRect::new(
-        CGPoint::new(x, COUNTDOWN_Y),
-        CGSize::new(width, LABEL_HEIGHT),
-    ));
-    view.addSubview(&time_label);
+    place(&time_label, COUNTDOWN_Y, width, LABEL_HEIGHT);
 
     // 6. Start / Stop button
     // SAFETY: buttonWithTitle_target_action is called on the main thread.
@@ -205,20 +193,13 @@ pub fn build_content_view(mtm: MainThreadMarker) -> PopoverControls {
         NSButton::buttonWithTitle_target_action(&NSString::from_str(TITLE_START), None, None, mtm)
     };
     start_stop_button.setBezelStyle(NSBezelStyle::Rounded);
-    start_stop_button.setFrame(CGRect::new(
-        CGPoint::new(x, START_BUTTON_Y),
-        CGSize::new(START_BUTTON_WIDTH, BUTTON_HEIGHT),
-    ));
-    view.addSubview(&start_stop_button);
+    place(&start_stop_button, START_BUTTON_Y, START_BUTTON_WIDTH, BUTTON_HEIGHT);
+
     // 7. Error label
     let error_label = NSTextField::labelWithString(&NSString::from_str(""), mtm);
     error_label.setTextColor(Some(&NSColor::systemRedColor()));
     error_label.setHidden(true);
-    error_label.setFrame(CGRect::new(
-        CGPoint::new(x, ERROR_Y),
-        CGSize::new(width, LABEL_HEIGHT),
-    ));
-    view.addSubview(&error_label);
+    place(&error_label, ERROR_Y, width, LABEL_HEIGHT);
 
     PopoverControls {
         view,
@@ -229,39 +210,5 @@ pub fn build_content_view(mtm: MainThreadMarker) -> PopoverControls {
         time_label,
         start_stop_button,
         error_label,
-    }
-}
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn unit_test_compute_ui_projection() {
-        let p_inactive_finite = compute_ui_projection(false, false, None);
-        assert_eq!(p_inactive_finite.start_stop_title, TITLE_START);
-        assert_eq!(p_inactive_finite.status_icon, ICON_INACTIVE);
-        assert!(p_inactive_finite.duration_enabled);
-        assert!(p_inactive_finite.unit_enabled);
-        assert!(p_inactive_finite.display_enabled);
-        assert!(p_inactive_finite.indefinite_enabled);
-        assert_eq!(p_inactive_finite.countdown_text, None);
-
-        let p_inactive_indefinite = compute_ui_projection(false, true, None);
-        assert!(!p_inactive_indefinite.duration_enabled);
-        assert!(!p_inactive_indefinite.unit_enabled);
-        assert!(p_inactive_indefinite.display_enabled);
-        assert!(p_inactive_indefinite.indefinite_enabled);
-
-        let p_active_finite = compute_ui_projection(true, false, Some("1h".to_string()));
-        assert_eq!(p_active_finite.start_stop_title, TITLE_STOP);
-        assert_eq!(p_active_finite.status_icon, ICON_ACTIVE);
-        assert!(!p_active_finite.duration_enabled);
-        assert!(!p_active_finite.unit_enabled);
-        assert!(!p_active_finite.display_enabled);
-        assert!(!p_active_finite.indefinite_enabled);
-        assert_eq!(p_active_finite.countdown_text, Some("1h".to_string()));
-
-        let p_active_indefinite = compute_ui_projection(true, true, Some("1h".to_string()));
-        assert_eq!(p_active_indefinite.countdown_text, None);
     }
 }

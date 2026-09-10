@@ -93,38 +93,33 @@ fn serve_connection(mut stream: UnixStream, requests: &SyncSender<Request>) {
     let _ = stream.set_read_timeout(Some(IPC_IO_TIMEOUT));
     let _ = stream.set_write_timeout(Some(IPC_IO_TIMEOUT));
 
+    let fail = |s: &mut UnixStream, msg: &[u8]| { let _ = s.write_all(msg); };
+
     let mut frame = Vec::new();
     let read = BufReader::new((&stream).take(MAX_COMMAND_READ_BYTES)).read_until(b'\n', &mut frame);
     if !matches!(read, Ok(length) if length > 0)
         || frame.len() > MAX_COMMAND_BYTES
         || frame.last() != Some(&b'\n')
     {
-        let _ = stream.write_all(b"ERR invalid frame\n");
+        fail(&mut stream, b"ERR invalid frame\n");
         return;
     }
 
-    let Ok(line) = std::str::from_utf8(&frame) else {
-        let _ = stream.write_all(b"ERR invalid command\n");
-        return;
-    };
-    let Some(command) = IpcCommand::parse(line) else {
-        let _ = stream.write_all(b"ERR invalid command\n");
+    let Some(command) = std::str::from_utf8(&frame).ok().and_then(IpcCommand::parse) else {
+        fail(&mut stream, b"ERR invalid command\n");
         return;
     };
 
     let (response_tx, response_rx) = mpsc::sync_channel(1);
     if requests.send((command, response_tx)).is_err() {
-        let _ = stream.write_all(b"ERR server stopping\n");
+        fail(&mut stream, b"ERR server stopping\n");
         return;
     }
 
-    match response_rx.recv_timeout(IPC_IO_TIMEOUT) {
-        Ok(response) => {
-            let _ = stream.write_all(response.serialize().as_bytes());
-        }
-        Err(_) => {
-            let _ = stream.write_all(b"ERR server timeout\n");
-        }
+    if let Ok(response) = response_rx.recv_timeout(IPC_IO_TIMEOUT) {
+        let _ = stream.write_all(response.serialize().as_bytes());
+    } else {
+        fail(&mut stream, b"ERR server timeout\n");
     }
 }
 
@@ -154,16 +149,7 @@ impl IpcServer {
             let worker_rx = Arc::clone(&stream_rx);
             let worker_requests = request_tx.clone();
             let _worker = thread::spawn(move || {
-                loop {
-                    let stream = {
-                        let Ok(receiver) = worker_rx.lock() else {
-                            return;
-                        };
-                        let Ok(stream) = receiver.recv() else {
-                            return;
-                        };
-                        stream
-                    };
+                while let Some(stream) = worker_rx.lock().ok().and_then(|rx| rx.recv().ok()) {
                     serve_connection(stream, &worker_requests);
                 }
             });
@@ -247,12 +233,33 @@ mod tests {
         ))
     }
 
-    #[test]
-    fn complete_frame_gets_response() -> Result<(), Box<dyn std::error::Error>> {
-        let (server, mut client) = UnixStream::pair()?;
-        client.set_read_timeout(Some(IPC_IO_TIMEOUT))?;
+    fn spawn_server(
+        read_timeout: Duration,
+    ) -> std::io::Result<(UnixStream, mpsc::Receiver<Request>, thread::JoinHandle<()>)> {
+        let (server, client) = UnixStream::pair()?;
+        client.set_read_timeout(Some(read_timeout))?;
         let (request_tx, request_rx) = mpsc::sync_channel(1);
         let worker = thread::spawn(move || serve_connection(server, &request_tx));
+        Ok((client, request_rx, worker))
+    }
+
+    fn run_server(
+        frame: &[u8],
+        read_timeout: Duration,
+        expected: &[u8],
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (mut client, _request_rx, worker) = spawn_server(read_timeout)?;
+        client.write_all(frame)?;
+        let mut response = Vec::new();
+        client.read_to_end(&mut response)?;
+        assert_eq!(response, expected);
+        assert!(worker.join().is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn complete_frame_gets_response() -> Result<(), Box<dyn std::error::Error>> {
+        let (mut client, request_rx, worker) = spawn_server(IPC_IO_TIMEOUT)?;
 
         client.write_all(b"STATUS\n")?;
         let (command, response_tx) = request_rx.recv_timeout(IPC_IO_TIMEOUT)?;
@@ -268,33 +275,13 @@ mod tests {
 
     #[test]
     fn newline_free_frame_times_out() -> Result<(), Box<dyn std::error::Error>> {
-        let (server, mut client) = UnixStream::pair()?;
-        client.set_read_timeout(Some(IPC_IO_TIMEOUT.saturating_mul(2)))?;
-        let (request_tx, _request_rx) = mpsc::sync_channel(1);
-        let worker = thread::spawn(move || serve_connection(server, &request_tx));
-
-        client.write_all(b"STATUS")?;
-        let mut response = Vec::new();
-        client.read_to_end(&mut response)?;
-        assert_eq!(response, b"ERR invalid frame\n");
-        assert!(worker.join().is_ok());
-        Ok(())
+        run_server(b"STATUS", IPC_IO_TIMEOUT.saturating_mul(2), b"ERR invalid frame\n")
     }
 
     #[test]
     fn oversized_frame_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
-        let (server, mut client) = UnixStream::pair()?;
-        client.set_read_timeout(Some(IPC_IO_TIMEOUT))?;
-        let (request_tx, _request_rx) = mpsc::sync_channel(1);
-        let worker = thread::spawn(move || serve_connection(server, &request_tx));
-
         let frame = vec![b'x'; MAX_COMMAND_BYTES + 1];
-        client.write_all(&frame)?;
-        let mut response = Vec::new();
-        client.read_to_end(&mut response)?;
-        assert_eq!(response, b"ERR invalid frame\n");
-        assert!(worker.join().is_ok());
-        Ok(())
+        run_server(&frame, IPC_IO_TIMEOUT, b"ERR invalid frame\n")
     }
 
     #[test]

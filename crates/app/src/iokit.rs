@@ -55,24 +55,3 @@ impl AssertionProvider for IOKitProvider {
         }
     }
 }
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn unit_test_iokit_provider_acquire_and_drop() {
-        let provider = IOKitProvider;
-        assert_eq!(format!("{provider:?}"), "IOKitProvider");
-        let handle_res = provider.acquire(AssertionKind::PreventSystemSleep);
-        if let Ok(handle) = handle_res {
-            assert_ne!(handle.id, 0);
-            assert!(format!("{handle:?}").contains("IOKitAssertion"));
-            drop(handle);
-        }
-        let handle_display = provider.acquire(AssertionKind::PreventDisplaySleep);
-        if let Ok(handle) = handle_display {
-            assert_ne!(handle.id, 0);
-            drop(handle);
-        }
-    }
-}

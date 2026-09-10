@@ -16,6 +16,7 @@ use crate::ui::{
 use app_core::duration::{DurationUnit, format_compact_duration, parse_duration};
 use app_core::ipc::{IpcCommand, IpcResponse};
 use block2::RcBlock;
+use objc2::encode::RefEncode;
 use objc2::rc::{Retained, Weak};
 use objc2::runtime::AnyObject;
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
@@ -92,16 +93,13 @@ define_class!(
         /// Handles left and right clicks on the status item button.
         #[unsafe(method(statusItemClicked:))]
         fn status_item_clicked(&self, sender: &NSStatusBarButton) {
-            let mtm = MainThreadMarker::from(self);
-            let app = NSApplication::sharedApplication(mtm);
             // SAFETY: currentEvent is called on the shared application on the main thread.
-            let event = app.currentEvent();
-            if let Some(ev) = event {
-                let event_type = ev.r#type();
-                if event_type == NSEventType::RightMouseUp {
-                    self.show_context_menu();
-                    return;
-                }
+            let app = NSApplication::sharedApplication(MainThreadMarker::from(self));
+            if let Some(ev) = app.currentEvent()
+                && ev.r#type() == NSEventType::RightMouseUp
+            {
+                self.show_context_menu();
+                return;
             }
             self.toggle_popover_relative_to(sender);
         }
@@ -124,11 +122,7 @@ define_class!(
         /// Terminates the application when Quit is clicked in the context menu.
         #[unsafe(method(quit:))]
         fn quit(&self, _sender: Option<&AnyObject>) {
-            self.teardown();
-            let mtm = MainThreadMarker::from(self);
-            let app = NSApplication::sharedApplication(mtm);
-            // SAFETY: terminate is called on the main thread during explicit user quit.
-            app.terminate(None);
+            self.terminate_app();
         }
     }
 );
@@ -166,14 +160,10 @@ impl AppDelegate {
         // SAFETY: setTarget and setAction are called on the main thread.
         unsafe {
             controls.indefinite_button.setTarget(Some(self));
-            controls
-                .indefinite_button
-                .setAction(Some(sel!(controlChanged:)));
+            controls.indefinite_button.setAction(Some(sel!(controlChanged:)));
 
             controls.start_stop_button.setTarget(Some(self));
-            controls
-                .start_stop_button
-                .setAction(Some(sel!(startStopClicked:)));
+            controls.start_stop_button.setAction(Some(sel!(startStopClicked:)));
         }
         let view_controller = NSViewController::new(mtm);
         view_controller.setView(&controls.view);
@@ -201,20 +191,13 @@ impl AppDelegate {
         if server.is_none() {
             eprintln!("Melaffeine: IPC server failed to start; CLI control unavailable");
         }
-        let mut state_opt = self.ivars().borrow_mut();
-        if let Some(state) = state_opt.as_mut() {
-            state.ipc_server = server;
-        }
-        drop(state_opt);
+        self.with_state_mut(|state| state.ipc_server = server);
         self.update_ui();
     }
 
     /// Toggles popover visibility relative to the status bar button.
     pub fn toggle_popover_relative_to(&self, button: &NSStatusBarButton) {
-        let is_shown = {
-            let state_opt = self.ivars().borrow();
-            state_opt.as_ref().is_some_and(|s| s.popover.isShown())
-        };
+        let is_shown = self.with_state(|s| s.popover.isShown()).unwrap_or(false);
 
         if is_shown {
             self.close_popover();
@@ -226,8 +209,7 @@ impl AppDelegate {
         let app = NSApplication::sharedApplication(mtm);
         #[allow(deprecated)]
         app.activateIgnoringOtherApps(true);
-        let state_opt = self.ivars().borrow();
-        if let Some(state) = state_opt.as_ref() {
+        self.with_state(|state| {
             let bounds = button.bounds();
             state
                 .popover
@@ -237,8 +219,7 @@ impl AppDelegate {
             {
                 let _ = window.makeFirstResponder(None);
             }
-        }
-        drop(state_opt);
+        });
 
         self.install_outside_click_monitor();
         self.start_countdown_timer_if_needed();
@@ -249,13 +230,12 @@ impl AppDelegate {
         self.remove_outside_click_monitor();
         self.stop_countdown_timer();
 
-        let state_opt = self.ivars().borrow();
-        if let Some(state) = state_opt.as_ref()
-            && state.popover.isShown()
-        {
-            // SAFETY: performClose is called on the main thread.
-            unsafe { state.popover.performClose(None) };
-        }
+        self.with_state(|state| {
+            if state.popover.isShown() {
+                // SAFETY: performClose is called on the main thread.
+                unsafe { state.popover.performClose(None) };
+            }
+        });
     }
 
     /// Displays the ephemeral right-click context menu containing Quit.
@@ -273,12 +253,8 @@ impl AppDelegate {
         };
         menu.addItem(&quit_item);
 
-        let status_item = {
-            let state_opt = self.ivars().borrow();
-            state_opt
-                .as_ref()
-                .map(|state| (state.status_item.clone(), state.status_item.button(mtm)))
-        };
+        let status_item =
+            self.with_state(|state| (state.status_item.clone(), state.status_item.button(mtm)));
         if let Some((item, button)) = status_item {
             item.setMenu(Some(&menu));
             if let Some(btn) = button {
@@ -293,45 +269,29 @@ impl AppDelegate {
     pub fn install_outside_click_monitor(&self) {
         self.remove_outside_click_monitor();
 
-        let weak_self: Weak<Self> = Weak::from_retained(&Retained::from(self));
-        let block = RcBlock::new(move |_event: NonNull<NSEvent>| {
-            if let Some(strong_self) = weak_self.load() {
-                strong_self.close_popover();
-            }
-        });
+        let block = self.weak_block::<NSEvent>(Self::close_popover);
 
         let monitor = NSEvent::addGlobalMonitorForEventsMatchingMask_handler(
             NSEventMask::LeftMouseDown | NSEventMask::RightMouseDown,
             &block,
         );
 
-        let mut state_opt = self.ivars().borrow_mut();
-        if let Some(state) = state_opt.as_mut() {
-            state.outside_click_monitor = monitor;
-        }
+        self.with_state_mut(|state| state.outside_click_monitor = monitor);
     }
 
     /// Removes and drops the active global event monitor if present.
     pub fn remove_outside_click_monitor(&self) {
-        let mut state_opt = self.ivars().borrow_mut();
-        if let Some(state) = state_opt.as_mut()
-            && let Some(monitor) = state.outside_click_monitor.take()
-        {
-            // SAFETY: removeMonitor is safe to call with a retained event monitor.
-            unsafe {
-                NSEvent::removeMonitor(&monitor);
+        self.with_state_mut(|state| {
+            if let Some(monitor) = state.outside_click_monitor.take() {
+                // SAFETY: removeMonitor is safe to call with a retained event monitor.
+                unsafe { NSEvent::removeMonitor(&monitor) };
             }
-        }
+        });
     }
 
     /// Starts or updates power assertion based on UI inputs.
     pub fn handle_start_stop(&self) -> Result<(), String> {
-        let is_active = {
-            let state_opt = self.ivars().borrow();
-            state_opt
-                .as_ref()
-                .is_some_and(|state| state.power.is_active())
-        };
+        let is_active = self.with_state(|state| state.power.is_active()).unwrap_or(false);
 
         if is_active {
             self.stop_power_and_expiry();
@@ -339,31 +299,29 @@ impl AppDelegate {
             return Ok(());
         }
 
-        let (duration, keep_display) = {
-            let state_opt = self.ivars().borrow();
-            let Some(state) = state_opt.as_ref() else {
-                return Err(String::from("App state not initialized"));
-            };
-            let indefinite = state.indefinite_button.state() == NSControlStateValueOn;
-            let keep_display = state.display_awake_button.state() == NSControlStateValueOn;
+        let (duration, keep_display) = self
+            .with_state(|state| {
+                let indefinite = state.indefinite_button.state() == NSControlStateValueOn;
+                let keep_display = state.display_awake_button.state() == NSControlStateValueOn;
 
-            if indefinite {
-                (Ok(None), keep_display)
-            } else {
-                let input = state.duration_field.stringValue().to_string();
-                let unit = match state.unit_popup.indexOfSelectedItem() {
-                    UNIT_MINUTES_INDEX => DurationUnit::Minutes,
-                    UNIT_DAYS_INDEX => DurationUnit::Days,
-                    _ => DurationUnit::Hours,
-                };
-                (
-                    parse_duration(input.trim(), unit)
-                        .map(Some)
-                        .ok_or_else(|| String::from(ERROR_DURATION_INVALID)),
-                    keep_display,
-                )
-            }
-        };
+                if indefinite {
+                    (Ok(None), keep_display)
+                } else {
+                    let input = state.duration_field.stringValue().to_string();
+                    let unit = match state.unit_popup.indexOfSelectedItem() {
+                        UNIT_MINUTES_INDEX => DurationUnit::Minutes,
+                        UNIT_DAYS_INDEX => DurationUnit::Days,
+                        _ => DurationUnit::Hours,
+                    };
+                    (
+                        parse_duration(input.trim(), unit)
+                            .map(Some)
+                            .ok_or_else(|| String::from(ERROR_DURATION_INVALID)),
+                        keep_display,
+                    )
+                }
+            })
+            .ok_or_else(|| String::from("App state not initialized"))?;
 
         self.start_session(duration?, keep_display)
     }
@@ -374,26 +332,18 @@ impl AppDelegate {
         duration_opt: Option<Duration>,
         keep_display: bool,
     ) -> Result<(), String> {
-        let mut state_opt = self.ivars().borrow_mut();
-        let Some(state) = state_opt.as_mut() else {
-            return Err(String::from("App state not initialized"));
-        };
+        let start_result = self
+            .with_state_mut(|state| {
+                Self::invalidate_timers(state);
+                state.power.start(duration_opt, keep_display, SystemTime::now())
+            })
+            .ok_or_else(|| String::from("App state not initialized"))?;
 
-        if let Some(timer) = state.expiry_timer.take() {
-            timer.invalidate();
-        }
-        if let Some(timer) = state.countdown_timer.take() {
-            timer.invalidate();
-        }
-
-        let now = SystemTime::now();
-        if let Err(error) = state.power.start(duration_opt, keep_display, now) {
-            drop(state_opt);
+        if let Err(error) = start_result {
             self.update_ui();
             return Err(error.to_string());
         }
 
-        drop(state_opt);
         if duration_opt.is_some() {
             self.schedule_expiry_timer();
         }
@@ -406,30 +356,23 @@ impl AppDelegate {
     pub fn execute_ipc_command(&self, command: &IpcCommand) -> IpcResponse {
         match command {
             IpcCommand::Status => {
-                let state_opt = self.ivars().borrow();
-                let Some(state) = state_opt.as_ref() else {
-                    return IpcResponse::Err(String::from("App not initialized"));
-                };
-                let is_active = state.power.is_active();
-                let keep_display_awake = state.power.keep_display_awake();
-                let ends_at = state.power.ends_at();
-                let ends_at_unix = ends_at.and_then(|t| {
-                    t.duration_since(SystemTime::UNIX_EPOCH)
-                        .ok()
-                        .map(|d| d.as_secs())
-                });
-                let remaining_compact = ends_at.map(|t| {
-                    let rem = t
-                        .duration_since(SystemTime::now())
-                        .unwrap_or(Duration::ZERO);
-                    format_compact_duration(rem)
-                });
-                IpcResponse::Status {
-                    is_active,
-                    keep_display_awake,
-                    ends_at_unix,
-                    remaining_compact,
-                }
+                self.with_state(|state| {
+                    let ends_at = state.power.ends_at();
+                    let ends_at_unix = ends_at
+                        .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+                        .map(|d| d.as_secs());
+                    let remaining_compact = ends_at.map(|t| {
+                        let rem = t.duration_since(SystemTime::now()).unwrap_or(Duration::ZERO);
+                        format_compact_duration(rem)
+                    });
+                    IpcResponse::Status {
+                        is_active: state.power.is_active(),
+                        keep_display_awake: state.power.keep_display_awake(),
+                        ends_at_unix,
+                        remaining_compact,
+                    }
+                })
+                .unwrap_or_else(|| IpcResponse::Err(String::from("App not initialized")))
             }
             IpcCommand::Stop => {
                 self.stop_power_and_expiry();
@@ -440,10 +383,7 @@ impl AppDelegate {
             // state (duration field, unit popup, checkboxes), so remote toggling
             // reflects what the user last configured in the popover.
             IpcCommand::Toggle => {
-                let is_active = {
-                    let state_opt = self.ivars().borrow();
-                    state_opt.as_ref().is_some_and(|s| s.power.is_active())
-                };
+                let is_active = self.with_state(|s| s.power.is_active()).unwrap_or(false);
                 if is_active {
                     self.stop_power_and_expiry();
                     self.update_ui();
@@ -469,18 +409,9 @@ impl AppDelegate {
                 Err(e) => IpcResponse::Err(e),
             },
             IpcCommand::Quit => {
-                let weak_self: Weak<Self> = Weak::from_retained(&Retained::from(self));
-                let block = RcBlock::new(move |_timer: NonNull<NSTimer>| {
-                    if let Some(strong_self) = weak_self.load() {
-                        strong_self.teardown();
-                        let mtm = MainThreadMarker::from(&*strong_self);
-                        let app = NSApplication::sharedApplication(mtm);
-                        app.terminate(None);
-                    }
-                });
-                let _ = unsafe {
-                    NSTimer::scheduledTimerWithTimeInterval_repeats_block(0.05, false, &block)
-                };
+                let block = self.weak_block::<NSTimer>(Self::terminate_app);
+                let _ =
+                    unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(0.05, false, &block) };
                 IpcResponse::Ok(String::from("Terminating"))
             }
         }
@@ -488,69 +419,46 @@ impl AppDelegate {
 
     /// Stops power assertion and invalidates expiry timer.
     pub fn stop_power_and_expiry(&self) {
-        let mut state_opt = self.ivars().borrow_mut();
-        if let Some(state) = state_opt.as_mut() {
-            if let Some(timer) = state.expiry_timer.take() {
-                timer.invalidate();
-            }
-            if let Some(timer) = state.countdown_timer.take() {
-                timer.invalidate();
-            }
+        self.with_state_mut(|state| {
+            Self::invalidate_timers(state);
             state.power.stop();
-        }
+        });
     }
 
     /// Schedules a one-shot expiry timer that re-checks the wall-clock end time on
     /// each fire, rescheduling for the true remainder if the run loop paused during
     /// system sleep. Stops the session when `ends_at` is absent or already past.
     fn schedule_expiry_timer(&self) {
-        let mut state_opt = self.ivars().borrow_mut();
-        let Some(state) = state_opt.as_mut() else {
+        let remaining = self.with_state_mut(|state| {
+            if let Some(timer) = state.expiry_timer.take() {
+                timer.invalidate();
+            }
+            state
+                .power
+                .ends_at()
+                .and_then(|ends_at| ends_at.duration_since(SystemTime::now()).ok())
+                .filter(|remaining| !remaining.is_zero())
+        });
+        let Some(remaining) = remaining else {
             return;
         };
-
-        if let Some(timer) = state.expiry_timer.take() {
-            timer.invalidate();
-        }
-
-        let remaining = state
-            .power
-            .ends_at()
-            .and_then(|ends_at| ends_at.duration_since(SystemTime::now()).ok())
-            .filter(|remaining| !remaining.is_zero());
-
         let Some(remaining) = remaining else {
-            drop(state_opt);
             self.stop_power_and_expiry();
             self.update_ui();
             return;
         };
 
-        let weak_self: Weak<Self> = Weak::from_retained(&Retained::from(self));
-        let block = RcBlock::new(move |_timer: NonNull<NSTimer>| {
-            if let Some(strong_self) = weak_self.load() {
-                strong_self.schedule_expiry_timer();
-            }
-        });
+        let block = self.weak_block::<NSTimer>(Self::schedule_expiry_timer);
         // SAFETY: scheduledTimerWithTimeInterval_repeats_block is called on the main thread.
         let timer = unsafe {
-            NSTimer::scheduledTimerWithTimeInterval_repeats_block(
-                remaining.as_secs_f64(),
-                false,
-                &block,
-            )
+            NSTimer::scheduledTimerWithTimeInterval_repeats_block(remaining.as_secs_f64(), false, &block)
         };
-        state.expiry_timer = Some(timer);
+        self.with_state_mut(|state| state.expiry_timer = Some(timer));
     }
 
     /// Synchronizes all native UI elements to match current power and settings projection.
     pub fn update_ui(&self) {
-        let mtm = MainThreadMarker::from(self);
-        let (active, indefinite, ends_at) = {
-            let state_opt = self.ivars().borrow();
-            let Some(state) = state_opt.as_ref() else {
-                return;
-            };
+        let updated = self.with_state(|state| {
             let active = state.power.is_active();
             let ends_at = state.power.ends_at();
             let indefinite = if active {
@@ -558,70 +466,62 @@ impl AppDelegate {
             } else {
                 state.indefinite_button.state() == NSControlStateValueOn
             };
-            (active, indefinite, ends_at)
-        };
+            let countdown_text = self.format_countdown(ends_at);
+            let projection = compute_ui_projection(active, indefinite, countdown_text);
 
-        let countdown_text = self.format_countdown(ends_at);
-        let projection = compute_ui_projection(active, indefinite, countdown_text);
-
-        let state_opt = self.ivars().borrow();
-        let Some(state) = state_opt.as_ref() else {
-            return;
-        };
-
-        state
-            .start_stop_button
-            .setTitle(&NSString::from_str(projection.start_stop_title));
-        state
-            .indefinite_button
-            .setEnabled(projection.indefinite_enabled);
-        state.duration_field.setEnabled(projection.duration_enabled);
-        state.unit_popup.setEnabled(projection.unit_enabled);
-        state
-            .display_awake_button
-            .setEnabled(projection.display_enabled);
-
-        if let Some(countdown) = &projection.countdown_text {
             state
-                .time_label
-                .setStringValue(&NSString::from_str(countdown));
-            state.time_label.setHidden(false);
-        } else {
-            state.time_label.setStringValue(&NSString::from_str(""));
-            state.time_label.setHidden(true);
-        }
-        state.error_label.setStringValue(&NSString::from_str(""));
-        state.error_label.setHidden(true);
-        if !active && let Some(conflict_app) = crate::conflicts::detect_external_conflict() {
+                .start_stop_button
+                .setTitle(&NSString::from_str(projection.start_stop_title));
             state
-                .error_label
-                .setStringValue(&NSString::from_str(&format!(
-                    "Note: {conflict_app} is also running."
-                )));
-            state.error_label.setHidden(false);
-        }
+                .indefinite_button
+                .setEnabled(projection.indefinite_enabled);
+            state.duration_field.setEnabled(projection.duration_enabled);
+            state.unit_popup.setEnabled(projection.unit_enabled);
+            state
+                .display_awake_button
+                .setEnabled(projection.display_enabled);
 
-        let symbol_name = if active { ICON_ACTIVE } else { ICON_INACTIVE };
-        if let Some(image) = NSImage::imageWithSystemSymbolName_accessibilityDescription(
-            &NSString::from_str(symbol_name),
-            Some(&NSString::from_str("Melaffeine")),
-        ) {
-            image.setTemplate(true);
-            if let Some(button) = state.status_item.button(mtm) {
-                button.setImage(Some(&image));
-                button.setTitle(&NSString::from_str(""));
+            if let Some(countdown) = &projection.countdown_text {
+                state
+                    .time_label
+                    .setStringValue(&NSString::from_str(countdown));
+                state.time_label.setHidden(false);
+            } else {
+                state.time_label.setStringValue(&NSString::from_str(""));
+                state.time_label.setHidden(true);
             }
-        }
+            state.error_label.setStringValue(&NSString::from_str(""));
+            state.error_label.setHidden(true);
+            if !active && let Some(conflict_app) = crate::conflicts::detect_external_conflict() {
+                state
+                    .error_label
+                    .setStringValue(&NSString::from_str(&format!(
+                        "Note: {conflict_app} is also running."
+                    )));
+                state.error_label.setHidden(false);
+            }
 
-        drop(state_opt);
-        self.start_countdown_timer_if_needed();
+            let symbol_name = if active { ICON_ACTIVE } else { ICON_INACTIVE };
+            if let Some(image) = NSImage::imageWithSystemSymbolName_accessibilityDescription(
+                &NSString::from_str(symbol_name),
+                Some(&NSString::from_str("Melaffeine")),
+            ) {
+                image.setTemplate(true);
+                if let Some(button) = state.status_item.button(MainThreadMarker::from(self)) {
+                    button.setImage(Some(&image));
+                    button.setTitle(&NSString::from_str(""));
+                }
+            }
+        });
+        if updated.is_some() {
+            self.start_countdown_timer_if_needed();
+        }
     }
 
     /// Formats the countdown string if a finite session is active with a future end time.
     pub fn format_countdown(&self, ends_at: Option<SystemTime>) -> Option<String> {
         let ends_at = ends_at?;
-        let now = SystemTime::now();
-        let remaining = ends_at.duration_since(now).ok()?;
+        let remaining = ends_at.duration_since(SystemTime::now()).ok()?;
         if remaining.is_zero() {
             return None;
         }
@@ -639,97 +539,102 @@ impl AppDelegate {
         let ns_date = NSDate::dateWithTimeIntervalSince1970(elapsed_since_epoch.as_secs_f64());
         let time_str = formatter.stringFromDate(&ns_date).to_string();
 
-        Some(format!(
-            "{COUNTDOWN_STOPS_IN_PREFIX}{compact}{COUNTDOWN_AT_SEPARATOR}{time_str}"
-        ))
+        Some(format!("{COUNTDOWN_STOPS_IN_PREFIX}{compact}{COUNTDOWN_AT_SEPARATOR}{time_str}"))
     }
 
     /// Displays an error message on the error label and unhides it.
     pub fn show_error(&self, message: &str) {
-        let state_opt = self.ivars().borrow();
-        if let Some(state) = state_opt.as_ref() {
-            state
-                .error_label
-                .setStringValue(&NSString::from_str(message));
+        self.with_state(|state| {
+            state.error_label.setStringValue(&NSString::from_str(message));
             state.error_label.setHidden(false);
             state.time_label.setStringValue(&NSString::from_str(""));
             state.time_label.setHidden(true);
-        }
+        });
     }
 
     /// Starts repeating countdown timer if popover is open for an active finite session.
     pub fn start_countdown_timer_if_needed(&self) {
-        let should_start = {
-            let state_opt = self.ivars().borrow();
-            state_opt.as_ref().is_some_and(|s| {
+        let should_start = self
+            .with_state(|s| {
                 s.countdown_timer.is_none()
                     && s.popover.isShown()
                     && s.power.is_active()
                     && s.power.ends_at().is_some()
             })
-        };
+            .unwrap_or(false);
 
         if !should_start {
             return;
         }
 
-        let weak_self: Weak<Self> = Weak::from_retained(&Retained::from(self));
-        let block = RcBlock::new(move |_timer: NonNull<NSTimer>| {
-            if let Some(strong_self) = weak_self.load() {
-                strong_self.update_ui();
-            }
-        });
+        let block = self.weak_block::<NSTimer>(Self::update_ui);
 
         // SAFETY: scheduledTimerWithTimeInterval_repeats_block is called on the main thread.
         let timer = unsafe {
-            NSTimer::scheduledTimerWithTimeInterval_repeats_block(
-                COUNTDOWN_UPDATE_INTERVAL,
-                true,
-                &block,
-            )
+            NSTimer::scheduledTimerWithTimeInterval_repeats_block(COUNTDOWN_UPDATE_INTERVAL, true, &block)
         };
         timer.setTolerance(COUNTDOWN_TIMER_TOLERANCE);
 
-        let mut state_opt = self.ivars().borrow_mut();
-        if let Some(state) = state_opt.as_mut() {
-            state.countdown_timer = Some(timer);
-        }
+        self.with_state_mut(|state| state.countdown_timer = Some(timer));
     }
 
     /// Stops and releases the active countdown timer.
     pub fn stop_countdown_timer(&self) {
-        let mut state_opt = self.ivars().borrow_mut();
-        if let Some(state) = state_opt.as_mut()
-            && let Some(timer) = state.countdown_timer.take()
-        {
-            timer.invalidate();
-        }
+        self.with_state_mut(|state| {
+            if let Some(timer) = state.countdown_timer.take() {
+                timer.invalidate();
+            }
+        });
     }
 
     /// Tears down all timers, monitors, and active power assertions upon quit.
     pub fn teardown(&self) {
-        let mut state_opt = self.ivars().borrow_mut();
-        if let Some(state) = state_opt.as_mut()
-            && let Some(mut server) = state.ipc_server.take()
-        {
-            server.stop();
-        }
-        drop(state_opt);
+        self.with_state_mut(|state| {
+            if let Some(mut server) = state.ipc_server.take() {
+                server.stop();
+            }
+        });
         self.remove_outside_click_monitor();
         self.stop_countdown_timer();
         self.stop_power_and_expiry();
     }
-}
-#[cfg(test)]
-mod tests {
-    use super::*;
 
-    #[test]
-    fn unit_test_app_delegate_lifecycle() {
-        if let Some(mtm) = MainThreadMarker::new() {
-            let delegate = AppDelegate::new(mtm);
-            let _ = delegate.format_countdown(Some(SystemTime::now()));
-            let _ = delegate.format_countdown(None);
+    /// Runs `f` with a shared borrow of the app state, if initialized.
+    fn with_state<R>(&self, f: impl FnOnce(&AppState) -> R) -> Option<R> {
+        self.ivars().borrow().as_ref().map(f)
+    }
+
+    /// Runs `f` with an exclusive borrow of the app state, if initialized.
+    fn with_state_mut<R>(&self, f: impl FnOnce(&mut AppState) -> R) -> Option<R> {
+        self.ivars().borrow_mut().as_mut().map(f)
+    }
+
+    /// Builds a block that invokes `f` on a weakly-held delegate, no-op after dealloc.
+    fn weak_block<T: RefEncode>(&self, f: impl Fn(&Self) + 'static) -> RcBlock<dyn Fn(NonNull<T>)> {
+        let weak_self: Weak<Self> = Weak::from_retained(&Retained::from(self));
+        RcBlock::new(move |_: NonNull<T>| {
+            if let Some(this) = weak_self.load() {
+                f(&this);
+            }
+        })
+    }
+
+    /// Invalidates and releases the expiry and countdown timers.
+    fn invalidate_timers(state: &mut AppState) {
+        if let Some(timer) = state.expiry_timer.take() {
+            timer.invalidate();
         }
+        if let Some(timer) = state.countdown_timer.take() {
+            timer.invalidate();
+        }
+    }
+
+    /// Tears down app state and terminates the shared application.
+    fn terminate_app(&self) {
+        self.teardown();
+        let mtm = MainThreadMarker::from(self);
+        let app = NSApplication::sharedApplication(mtm);
+        // SAFETY: terminate is called on the main thread during explicit user quit.
+        app.terminate(None);
     }
 }

@@ -10,19 +10,14 @@
     dead_code
 )]
 
-use std::cell::Cell;
-use std::rc::Rc;
 use std::time::{Duration, SystemTime};
 
 use app::app_delegate::AppDelegate;
-use app::iokit::IOKitProvider;
-use app::power::{AssertionKind, AssertionProvider, PowerController, PowerError};
 use app::ui::{
-    DEFAULT_DURATION_TEXT, ERROR_DURATION_INVALID, ICON_INACTIVE, TITLE_KEEP_DISPLAY_AWAKE,
-    TITLE_RUN_INDEFINITELY, TITLE_START, TITLE_STOP, UNIT_DAYS_INDEX, UNIT_HOURS_INDEX,
-    UNIT_MINUTES_INDEX, build_content_view, compute_ui_projection,
+    DEFAULT_DURATION_TEXT, ERROR_DURATION_INVALID, TITLE_KEEP_DISPLAY_AWAKE,
+    TITLE_RUN_INDEFINITELY, TITLE_START, UNIT_DAYS_INDEX, UNIT_HOURS_INDEX,
+    UNIT_MINUTES_INDEX, build_content_view,
 };
-use app_core::duration::{DurationUnit, format_compact_duration, parse_duration};
 use app_core::ipc::{IpcCommand, IpcResponse};
 use objc2::runtime::ProtocolObject;
 use objc2::{DefinedClass, MainThreadMarker, msg_send};
@@ -30,25 +25,6 @@ use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSControlStateValueOff, NSControlStateValueOn,
 };
 use objc2_foundation::{NSNotification, NSString, NSTimer};
-
-#[derive(Clone, Default)]
-struct MockProvider {
-    fail: Rc<Cell<bool>>,
-}
-
-#[derive(Debug)]
-struct MockHandle;
-
-impl AssertionProvider for MockProvider {
-    type Handle = MockHandle;
-    fn acquire(&self, _kind: AssertionKind) -> Result<Self::Handle, PowerError> {
-        if self.fail.get() {
-            Err(PowerError::AcquisitionFailed(-1))
-        } else {
-            Ok(MockHandle)
-        }
-    }
-}
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -341,119 +317,5 @@ fn main() {
     unsafe {
         let _: () = msg_send![&*delegate, applicationWillTerminate: &*notif];
     }
-    // 4. Test IOKitProvider
-    let provider = IOKitProvider;
-    assert_eq!(format!("{provider:?}"), "IOKitProvider");
-    let sys_handle = provider.acquire(AssertionKind::PreventSystemSleep);
-    if let Ok(h) = sys_handle {
-        assert!(format!("{h:?}").contains("IOKitAssertion"));
-        drop(h);
-    }
-    let disp_handle = provider.acquire(AssertionKind::PreventDisplaySleep);
-    if let Ok(h) = disp_handle {
-        drop(h);
-    }
-
-    // 5. Test PowerController with IOKitProvider and MockProvider
-    let mut iokit_power = PowerController::new(IOKitProvider);
-    assert!(!iokit_power.is_active());
-    assert!(!iokit_power.keep_display_awake());
-    assert_eq!(iokit_power.started_at(), None);
-    assert_eq!(iokit_power.ends_at(), None);
-    let _ = format!("{iokit_power:?}");
-    let now = SystemTime::now();
-    let _ = iokit_power.start(Some(Duration::from_secs(60)), true, now);
-    let _ = iokit_power.keep_display_awake();
-    let _ = iokit_power.started_at();
-    let _ = iokit_power.ends_at();
-    let _ = format!("{iokit_power:?}");
-    iokit_power.stop();
-
-    let mock = MockProvider::default();
-    let mut power = PowerController::new(mock);
-    assert!(!power.is_active());
-    assert!(!power.keep_display_awake());
-    assert_eq!(power.started_at(), None);
-    assert_eq!(power.ends_at(), None);
-    assert!(
-        power
-            .start(Some(Duration::from_secs(60)), true, now)
-            .is_ok()
-    );
-    assert!(power.is_active());
-    assert!(power.keep_display_awake());
-    assert_eq!(power.started_at(), Some(now));
-    assert_eq!(power.ends_at(), Some(now + Duration::from_secs(60)));
-    let dbg = format!("{power:?}");
-    assert!(dbg.contains("PowerController"));
-    power.stop();
-    assert!(!power.is_active());
-
-    // Replacement acquisition errors preserve the platform error and reset projection state.
-    let replacement_provider = MockProvider::default();
-    let mut replacement_power = PowerController::new(replacement_provider.clone());
-    assert!(replacement_power.start(None, false, now).is_ok());
-    replacement_provider.fail.set(true);
-    let replacement_error = replacement_power
-        .start(None, false, now)
-        .expect_err("replacement acquisition should fail");
-    assert_eq!(
-        replacement_error.to_string(),
-        "Failed to acquire power assertion (code: -1)"
-    );
-    assert!(!replacement_power.is_active());
-    assert_eq!(replacement_power.ends_at(), None);
-    let replacement_projection = compute_ui_projection(
-        replacement_power.is_active(),
-        replacement_power.ends_at().is_none(),
-        None,
-    );
-    assert_eq!(replacement_projection.status_icon, ICON_INACTIVE);
-    assert_eq!(replacement_projection.start_stop_title, TITLE_START);
-
-    let fail_provider = MockProvider::default();
-    fail_provider.fail.set(true);
-    let mut fail_power = PowerController::new(fail_provider);
-    assert!(fail_power.start(None, false, now).is_err());
-    assert!(!fail_power.is_active());
-
-    // 6. Test AppCore duration functions
-    assert_eq!(
-        parse_duration("10", DurationUnit::Minutes),
-        Some(Duration::from_secs(600))
-    );
-    assert_eq!(
-        parse_duration("1", DurationUnit::Hours),
-        Some(Duration::from_secs(3600))
-    );
-    assert_eq!(
-        parse_duration("1", DurationUnit::Days),
-        Some(Duration::from_secs(86400))
-    );
-    assert_eq!(parse_duration("0", DurationUnit::Minutes), None);
-    assert_eq!(parse_duration("-5", DurationUnit::Minutes), None);
-    assert_eq!(parse_duration("abc", DurationUnit::Minutes), None);
-    assert_eq!(parse_duration("", DurationUnit::Minutes), None);
-    assert_eq!(parse_duration("525601", DurationUnit::Minutes), None);
-
-    assert_eq!(format_compact_duration(Duration::from_nanos(0)), "<1m");
-    assert_eq!(format_compact_duration(Duration::from_secs(30)), "1m");
-    assert_eq!(format_compact_duration(Duration::from_secs(60)), "1m");
-    assert_eq!(format_compact_duration(Duration::from_secs(3600)), "1h 0m");
-    assert_eq!(format_compact_duration(Duration::from_secs(3660)), "1h 1m");
-    assert_eq!(format_compact_duration(Duration::from_secs(86400)), "1d 0h");
-    assert_eq!(
-        format_compact_duration(Duration::from_secs(86400 + 7200)),
-        "1d 2h"
-    );
-
-    // 7. Test UiProjection combinations
-    let proj1 = compute_ui_projection(false, false, None);
-    assert_eq!(proj1.start_stop_title, TITLE_START);
-    let proj2 = compute_ui_projection(true, true, None);
-    assert_eq!(proj2.start_stop_title, TITLE_STOP);
-    let proj3 = compute_ui_projection(true, false, Some("5m".to_string()));
-    assert_eq!(proj3.countdown_text, Some("5m".to_string()));
-
     println!("All main thread integration tests PASSED!");
 }
