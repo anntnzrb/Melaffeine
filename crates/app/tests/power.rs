@@ -117,11 +117,18 @@ fn power_error_source_is_none() {
 
 #[test]
 fn power_error_code_returns_inner_code() {
-    assert_eq!(PowerError::AcquisitionFailed(-1).code(), -1);
-    assert_eq!(PowerError::AcquisitionFailed(0).code(), 0);
-    assert_eq!(PowerError::AcquisitionFailed(100).code(), 100);
-    assert_eq!(PowerError::AcquisitionFailed(i32::MIN).code(), i32::MIN);
-    assert_eq!(PowerError::AcquisitionFailed(i32::MAX).code(), i32::MAX);
+    assert_eq!(PowerError::AcquisitionFailed(-1).code(), Some(-1));
+    assert_eq!(PowerError::AcquisitionFailed(0).code(), Some(0));
+    assert_eq!(PowerError::AcquisitionFailed(100).code(), Some(100));
+    assert_eq!(
+        PowerError::AcquisitionFailed(i32::MIN).code(),
+        Some(i32::MIN)
+    );
+    assert_eq!(
+        PowerError::AcquisitionFailed(i32::MAX).code(),
+        Some(i32::MAX)
+    );
+    assert_eq!(PowerError::DurationOverflow.code(), None);
 }
 
 #[test]

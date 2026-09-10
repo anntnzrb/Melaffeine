@@ -16,6 +16,8 @@ pub enum AssertionKind {
 pub enum PowerError {
     /// Failed to acquire the power assertion with the given return code.
     AcquisitionFailed(i32),
+    /// The requested duration overflows the system clock.
+    DurationOverflow,
 }
 
 impl fmt::Display for PowerError {
@@ -23,6 +25,12 @@ impl fmt::Display for PowerError {
         match self {
             Self::AcquisitionFailed(code) => {
                 write!(f, "Failed to acquire power assertion (code: {code})")
+            }
+            Self::DurationOverflow => {
+                write!(
+                    f,
+                    "Requested duration exceeds the representable system time"
+                )
             }
         }
     }
@@ -33,9 +41,10 @@ impl Error for PowerError {}
 impl PowerError {
     /// Returns the underlying error code if available.
     #[must_use]
-    pub const fn code(&self) -> i32 {
+    pub const fn code(&self) -> Option<i32> {
         match self {
-            Self::AcquisitionFailed(code) => *code,
+            Self::AcquisitionFailed(code) => Some(*code),
+            Self::DurationOverflow => None,
         }
     }
 }
@@ -120,7 +129,8 @@ impl<P: AssertionProvider> PowerController<P> {
     ///
     /// # Errors
     ///
-    /// Returns `PowerError` if acquiring the assertion fails. On error, the controller
+    /// Returns `PowerError` if acquiring the assertion fails or the requested duration
+    /// overflows the system clock (`PowerError::DurationOverflow`). On error, the controller
     /// remains inactive with no active timestamps.
     pub fn start(
         &mut self,
@@ -134,8 +144,10 @@ impl<P: AssertionProvider> PowerController<P> {
         } else {
             AssertionKind::PreventSystemSleep
         };
+        let ends_at = duration
+            .map(|d| now.checked_add(d).ok_or(PowerError::DurationOverflow))
+            .transpose()?;
         let handle = self.provider.acquire(kind)?;
-        let ends_at = duration.and_then(|d| now.checked_add(d));
         self.session = Some(ActiveSession {
             _handle: handle,
             kind,
@@ -252,11 +264,15 @@ mod tests {
             controller.stop();
         }
     }
-
     #[test]
     fn unit_test_power_error_and_kinds() {
         let err = PowerError::AcquisitionFailed(42);
-        assert_eq!(err.code(), 42);
+        assert_eq!(err.code(), Some(42));
+        assert_eq!(PowerError::DurationOverflow.code(), None);
+        assert_eq!(
+            format!("{}", PowerError::DurationOverflow),
+            "Requested duration exceeds the representable system time"
+        );
         assert!(format!("{err}").contains("42"));
         assert!(err.source().is_none());
 
@@ -269,5 +285,20 @@ mod tests {
         assert_eq!(format!("{kind:?}"), "PreventSystemSleep");
         let kind3 = kind;
         assert_eq!(kind, kind3);
+    }
+
+    #[test]
+    fn unit_test_power_controller_duration_overflow() {
+        let provider = TestProvider::default();
+        let mut controller = PowerController::new(provider);
+        let now = SystemTime::now();
+
+        assert_eq!(
+            controller.start(Some(Duration::MAX), false, now),
+            Err(PowerError::DurationOverflow)
+        );
+        assert!(!controller.is_active());
+        assert_eq!(controller.started_at(), None);
+        assert_eq!(controller.ends_at(), None);
     }
 }
