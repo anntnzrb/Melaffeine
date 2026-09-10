@@ -44,11 +44,35 @@ fn remove_socket_if_owned(path: &Path, identity: (u64, u64)) {
     }
 }
 
+/// Probes whether a live IPC owner still answers STATUS on `path`.
+fn probe_live_owner(path: &Path) -> bool {
+    let Ok(mut stream) = UnixStream::connect(path) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(IPC_IO_TIMEOUT));
+    let _ = stream.set_write_timeout(Some(IPC_IO_TIMEOUT));
+    if stream
+        .write_all(IpcCommand::Status.serialize().as_bytes())
+        .is_err()
+    {
+        return false;
+    }
+    let mut reply = Vec::new();
+    let read = BufReader::new((&stream).take(MAX_COMMAND_READ_BYTES)).read_until(b'\n', &mut reply);
+    if !matches!(read, Ok(length) if length > 0) {
+        return false;
+    }
+    let Ok(line) = std::str::from_utf8(&reply) else {
+        return false;
+    };
+    IpcResponse::parse(line).is_some()
+}
+
 fn bind_listener(path: &Path) -> Option<(UnixListener, (u64, u64))> {
     let listener = match UnixListener::bind(path) {
         Ok(listener) => listener,
         Err(error) if error.kind() == ErrorKind::AddrInUse => {
-            if UnixStream::connect(path).is_ok() {
+            if probe_live_owner(path) {
                 return None;
             }
             let metadata = fs::symlink_metadata(path).ok()?;
@@ -275,31 +299,59 @@ mod tests {
 
     #[test]
     fn ownership_cases_are_safe() -> Result<(), Box<dyn std::error::Error>> {
-        let live_path = temporary_path("live");
-        let (live_listener, live_identity) = bind_listener(&live_path)
+        let dead_path = temporary_path("dead");
+        let (dead_listener, dead_identity) = bind_listener(&dead_path)
             .ok_or_else(|| std::io::Error::other("bind first listener"))?;
-        let first_metadata = fs::symlink_metadata(&live_path)?;
-        assert_eq!((first_metadata.dev(), first_metadata.ino()), live_identity);
+        let first_metadata = fs::symlink_metadata(&dead_path)?;
+        assert_eq!((first_metadata.dev(), first_metadata.ino()), dead_identity);
 
+        let (new_listener, new_identity) = bind_listener(&dead_path)
+            .ok_or_else(|| std::io::Error::other("replace dead listener"))?;
+        assert_ne!(
+            new_identity, dead_identity,
+            "a bound-but-nonresponding listener is stale and must be replaced"
+        );
+        let new_metadata = fs::symlink_metadata(&dead_path)?;
+        assert_eq!(
+            (new_metadata.dev(), new_metadata.ino()),
+            new_identity,
+            "the new listener must own the path"
+        );
+
+        remove_socket_if_owned(&dead_path, (u64::MAX, u64::MAX));
+        assert!(
+            dead_path.exists(),
+            "wrong ownership must not unlink a socket"
+        );
+        drop(dead_listener);
+        drop(new_listener);
+        remove_socket_if_owned(&dead_path, new_identity);
+        assert!(!dead_path.exists(), "the owner must be able to clean up");
+
+        let live_path = temporary_path("live");
+        let (live_listener, live_identity) =
+            bind_listener(&live_path).ok_or_else(|| std::io::Error::other("bind live listener"))?;
+        let responder = thread::spawn(move || {
+            let (stream, _) = live_listener.accept()?;
+            let mut reply = Vec::new();
+            BufReader::new(&stream).read_until(b'\n', &mut reply)?;
+            (&stream)
+                .write_all(b"STATUS active=false display=false ends_at=none remaining=none\n")?;
+            std::io::Result::Ok(())
+        });
         assert!(
             bind_listener(&live_path).is_none(),
-            "a live listener must not be replaced"
+            "a live listener answering STATUS must not be replaced"
         );
+        assert!(matches!(responder.join(), Ok(Ok(()))));
         let live_metadata = fs::symlink_metadata(&live_path)?;
         assert_eq!(
             (live_metadata.dev(), live_metadata.ino()),
             live_identity,
-            "the first listener must retain ownership"
+            "the live listener must retain ownership"
         );
-
-        remove_socket_if_owned(&live_path, (u64::MAX, u64::MAX));
-        assert!(
-            live_path.exists(),
-            "wrong ownership must not unlink a socket"
-        );
-        drop(live_listener);
         remove_socket_if_owned(&live_path, live_identity);
-        assert!(!live_path.exists(), "the owner must be able to clean up");
+        assert!(!live_path.exists(), "live socket cleanup must be safe");
 
         let stale_path = temporary_path("stale");
         let stale_listener = UnixListener::bind(&stale_path)?;
