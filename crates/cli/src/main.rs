@@ -76,17 +76,13 @@ fn run_cli(cli: Cli) -> Result<IpcResponse, String> {
             display,
             indefinite,
         } => {
-            let parsed_duration: Option<Duration> = if indefinite {
-                None
-            } else if let Some(spec) = duration {
-                let Some(dur) = parse_duration_spec(&spec) else {
-                    return Err(format!(
+            let parsed_duration: Option<Duration> = match (indefinite, duration) {
+                (true, _) | (_, None) => None,
+                (false, Some(spec)) => Some(parse_duration_spec(&spec).ok_or_else(|| {
+                    format!(
                         "Error: Invalid duration specification '{spec}'. Use format like 2h, 45m, 1d."
-                    ));
-                };
-                Some(dur)
-            } else {
-                None
+                    )
+                })?),
             };
             IpcCommand::Start {
                 duration: parsed_duration,
@@ -137,44 +133,31 @@ mod tests {
 
     #[test]
     fn test_cli_parsing() {
-        let status = Cli::try_parse_from(["melaffeine", "status"]).unwrap();
-        assert!(matches!(status.command, Commands::Status));
+        let parse = |args: &[&str]| Cli::try_parse_from(args).unwrap().command;
+        assert!(matches!(parse(&["melaffeine", "status"]), Commands::Status));
+        assert!(matches!(parse(&["melaffeine", "stop"]), Commands::Stop));
+        assert!(matches!(parse(&["melaffeine", "toggle"]), Commands::Toggle));
+        assert!(matches!(parse(&["melaffeine", "quit"]), Commands::Quit));
 
-        let stop = Cli::try_parse_from(["melaffeine", "stop"]).unwrap();
-        assert!(matches!(stop.command, Commands::Stop));
-
-        let toggle = Cli::try_parse_from(["melaffeine", "toggle"]).unwrap();
-        assert!(matches!(toggle.command, Commands::Toggle));
-
-        let quit = Cli::try_parse_from(["melaffeine", "quit"]).unwrap();
-        assert!(matches!(quit.command, Commands::Quit));
-
-        let start_dur = Cli::try_parse_from(["melaffeine", "start", "2h", "--display"]).unwrap();
-        if let Commands::Start {
-            duration,
-            display,
-            indefinite,
-        } = start_dur.command
-        {
-            assert_eq!(duration, Some(String::from("2h")));
-            assert!(display);
-            assert!(!indefinite);
-        } else {
-            panic!("expected Start command");
-        }
-
-        let start_indef = Cli::try_parse_from(["melaffeine", "start", "--indefinite"]).unwrap();
-        if let Commands::Start {
-            duration,
-            display,
-            indefinite,
-        } = start_indef.command
-        {
-            assert_eq!(duration, None);
-            assert!(!display);
-            assert!(indefinite);
-        } else {
-            panic!("expected Start command");
+        for (args, expected) in [
+            (
+                &["melaffeine", "start", "2h", "--display"][..],
+                (Some("2h"), true, false),
+            ),
+            (&["melaffeine", "start", "--indefinite"][..], (None, false, true)),
+        ] {
+            let cli = Cli::try_parse_from(args).unwrap();
+            let Commands::Start {
+                duration,
+                display,
+                indefinite,
+            } = cli.command
+            else {
+                panic!("expected Start command")
+            };
+            assert_eq!(duration.as_deref(), expected.0);
+            assert_eq!(display, expected.1);
+            assert_eq!(indefinite, expected.2);
         }
     }
 
