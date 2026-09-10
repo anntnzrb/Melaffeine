@@ -74,8 +74,9 @@ clean:
 format:
     nix fmt
 
-# run cargo check, nextest, and clippy with denied warnings
+# run formatting check, cargo check, nextest, and clippy with denied warnings
 check:
+    nix fmt -- --fail-on-change
     cargo check --workspace --all-targets
     cargo nextest run --workspace
     cargo clippy --workspace --all-targets -- --deny warnings
