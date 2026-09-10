@@ -146,18 +146,17 @@ impl AppDelegate {
         let status_bar = NSStatusBar::systemStatusBar();
         let status_item = status_bar.statusItemWithLength(NSVariableStatusItemLength);
 
-        let Some(button) = status_item.button(mtm) else {
+        if let Some(button) = status_item.button(mtm) {
+            // SAFETY: setTarget, setAction, and sendActionOn are called on the main thread.
+            unsafe {
+                button.setTarget(Some(self));
+                button.setAction(Some(sel!(statusItemClicked:)));
+                button.sendActionOn(NSEventMask::LeftMouseUp | NSEventMask::RightMouseUp);
+            }
+            button.setToolTip(Some(&NSString::from_str("Melaffeine")));
+        } else {
             eprintln!("Melaffeine: Failed to obtain NSStatusBarButton");
-            return;
-        };
-
-        // SAFETY: setTarget, setAction, and sendActionOn are called on the main thread.
-        unsafe {
-            button.setTarget(Some(self));
-            button.setAction(Some(sel!(statusItemClicked:)));
-            button.sendActionOn(NSEventMask::LeftMouseUp | NSEventMask::RightMouseUp);
         }
-        button.setToolTip(Some(&NSString::from_str("Melaffeine")));
         let popover = NSPopover::new(mtm);
         popover.setBehavior(NSPopoverBehavior::Transient);
         popover.setContentSize(NSSize::new(MENU_WIDTH, MENU_HEIGHT));
@@ -199,6 +198,9 @@ impl AppDelegate {
 
         *self.ivars().borrow_mut() = Some(app_state);
         let server = IpcServer::start(self);
+        if server.is_none() {
+            eprintln!("Melaffeine: IPC server failed to start; CLI control unavailable");
+        }
         let mut state_opt = self.ivars().borrow_mut();
         if let Some(state) = state_opt.as_mut() {
             state.ipc_server = server;
@@ -355,7 +357,7 @@ impl AppDelegate {
                     _ => DurationUnit::Hours,
                 };
                 (
-                    parse_duration(&input, unit)
+                    parse_duration(input.trim(), unit)
                         .map(Some)
                         .ok_or_else(|| String::from(ERROR_DURATION_INVALID)),
                     keep_display,
@@ -391,25 +393,10 @@ impl AppDelegate {
             return Err(error.to_string());
         }
 
-        if let Some(dur) = duration_opt {
-            let weak_self: Weak<Self> = Weak::from_retained(&Retained::from(self));
-            let block = RcBlock::new(move |_timer: NonNull<NSTimer>| {
-                if let Some(strong_self) = weak_self.load() {
-                    strong_self.stop_power_and_expiry();
-                    strong_self.update_ui();
-                }
-            });
-            let timer = unsafe {
-                NSTimer::scheduledTimerWithTimeInterval_repeats_block(
-                    dur.as_secs_f64(),
-                    false,
-                    &block,
-                )
-            };
-            state.expiry_timer = Some(timer);
-        }
-
         drop(state_opt);
+        if duration_opt.is_some() {
+            self.schedule_expiry_timer();
+        }
         self.update_ui();
         Ok(())
     }
@@ -449,6 +436,9 @@ impl AppDelegate {
                 self.update_ui();
                 IpcResponse::Ok(String::from("Stopped sleep prevention"))
             }
+            // Toggle when inactive intentionally starts from the current UI control
+            // state (duration field, unit popup, checkboxes), so remote toggling
+            // reflects what the user last configured in the popover.
             IpcCommand::Toggle => {
                 let is_active = {
                     let state_opt = self.ivars().borrow();
@@ -508,6 +498,49 @@ impl AppDelegate {
             }
             state.power.stop();
         }
+    }
+
+    /// Schedules a one-shot expiry timer that re-checks the wall-clock end time on
+    /// each fire, rescheduling for the true remainder if the run loop paused during
+    /// system sleep. Stops the session when `ends_at` is absent or already past.
+    fn schedule_expiry_timer(&self) {
+        let mut state_opt = self.ivars().borrow_mut();
+        let Some(state) = state_opt.as_mut() else {
+            return;
+        };
+
+        if let Some(timer) = state.expiry_timer.take() {
+            timer.invalidate();
+        }
+
+        let remaining = state
+            .power
+            .ends_at()
+            .and_then(|ends_at| ends_at.duration_since(SystemTime::now()).ok())
+            .filter(|remaining| !remaining.is_zero());
+
+        let Some(remaining) = remaining else {
+            drop(state_opt);
+            self.stop_power_and_expiry();
+            self.update_ui();
+            return;
+        };
+
+        let weak_self: Weak<Self> = Weak::from_retained(&Retained::from(self));
+        let block = RcBlock::new(move |_timer: NonNull<NSTimer>| {
+            if let Some(strong_self) = weak_self.load() {
+                strong_self.schedule_expiry_timer();
+            }
+        });
+        // SAFETY: scheduledTimerWithTimeInterval_repeats_block is called on the main thread.
+        let timer = unsafe {
+            NSTimer::scheduledTimerWithTimeInterval_repeats_block(
+                remaining.as_secs_f64(),
+                false,
+                &block,
+            )
+        };
+        state.expiry_timer = Some(timer);
     }
 
     /// Synchronizes all native UI elements to match current power and settings projection.
