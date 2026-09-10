@@ -215,10 +215,6 @@ fn test_ipc_response_serialize_parse_display() {
         // Unknown field
         "STATUS active=true display=false ends_at=123 remaining=none unexpected=value",
     ] {
-        assert_eq!(
-            IpcResponse::parse(line),
-            None,
-            "expected {line:?} rejected"
-        );
+        assert_eq!(IpcResponse::parse(line), None, "expected {line:?} rejected");
     }
 }

@@ -160,10 +160,14 @@ impl AppDelegate {
         // SAFETY: setTarget and setAction are called on the main thread.
         unsafe {
             controls.indefinite_button.setTarget(Some(self));
-            controls.indefinite_button.setAction(Some(sel!(controlChanged:)));
+            controls
+                .indefinite_button
+                .setAction(Some(sel!(controlChanged:)));
 
             controls.start_stop_button.setTarget(Some(self));
-            controls.start_stop_button.setAction(Some(sel!(startStopClicked:)));
+            controls
+                .start_stop_button
+                .setAction(Some(sel!(startStopClicked:)));
         }
         let view_controller = NSViewController::new(mtm);
         view_controller.setView(&controls.view);
@@ -291,7 +295,9 @@ impl AppDelegate {
 
     /// Starts or updates power assertion based on UI inputs.
     pub fn handle_start_stop(&self) -> Result<(), String> {
-        let is_active = self.with_state(|state| state.power.is_active()).unwrap_or(false);
+        let is_active = self
+            .with_state(|state| state.power.is_active())
+            .unwrap_or(false);
 
         if is_active {
             self.stop_power_and_expiry();
@@ -335,7 +341,9 @@ impl AppDelegate {
         let start_result = self
             .with_state_mut(|state| {
                 Self::invalidate_timers(state);
-                state.power.start(duration_opt, keep_display, SystemTime::now())
+                state
+                    .power
+                    .start(duration_opt, keep_display, SystemTime::now())
             })
             .ok_or_else(|| String::from("App state not initialized"))?;
 
@@ -355,14 +363,16 @@ impl AppDelegate {
     #[allow(clippy::option_if_let_else)]
     pub fn execute_ipc_command(&self, command: &IpcCommand) -> IpcResponse {
         match command {
-            IpcCommand::Status => {
-                self.with_state(|state| {
+            IpcCommand::Status => self
+                .with_state(|state| {
                     let ends_at = state.power.ends_at();
                     let ends_at_unix = ends_at
                         .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
                         .map(|d| d.as_secs());
                     let remaining_compact = ends_at.map(|t| {
-                        let rem = t.duration_since(SystemTime::now()).unwrap_or(Duration::ZERO);
+                        let rem = t
+                            .duration_since(SystemTime::now())
+                            .unwrap_or(Duration::ZERO);
                         format_compact_duration(rem)
                     });
                     IpcResponse::Status {
@@ -372,8 +382,7 @@ impl AppDelegate {
                         remaining_compact,
                     }
                 })
-                .unwrap_or_else(|| IpcResponse::Err(String::from("App not initialized")))
-            }
+                .unwrap_or_else(|| IpcResponse::Err(String::from("App not initialized"))),
             IpcCommand::Stop => {
                 self.stop_power_and_expiry();
                 self.update_ui();
@@ -410,8 +419,9 @@ impl AppDelegate {
             },
             IpcCommand::Quit => {
                 let block = self.weak_block::<NSTimer>(Self::terminate_app);
-                let _ =
-                    unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(0.05, false, &block) };
+                let _ = unsafe {
+                    NSTimer::scheduledTimerWithTimeInterval_repeats_block(0.05, false, &block)
+                };
                 IpcResponse::Ok(String::from("Terminating"))
             }
         }
@@ -451,7 +461,11 @@ impl AppDelegate {
         let block = self.weak_block::<NSTimer>(Self::schedule_expiry_timer);
         // SAFETY: scheduledTimerWithTimeInterval_repeats_block is called on the main thread.
         let timer = unsafe {
-            NSTimer::scheduledTimerWithTimeInterval_repeats_block(remaining.as_secs_f64(), false, &block)
+            NSTimer::scheduledTimerWithTimeInterval_repeats_block(
+                remaining.as_secs_f64(),
+                false,
+                &block,
+            )
         };
         self.with_state_mut(|state| state.expiry_timer = Some(timer));
     }
@@ -539,13 +553,17 @@ impl AppDelegate {
         let ns_date = NSDate::dateWithTimeIntervalSince1970(elapsed_since_epoch.as_secs_f64());
         let time_str = formatter.stringFromDate(&ns_date).to_string();
 
-        Some(format!("{COUNTDOWN_STOPS_IN_PREFIX}{compact}{COUNTDOWN_AT_SEPARATOR}{time_str}"))
+        Some(format!(
+            "{COUNTDOWN_STOPS_IN_PREFIX}{compact}{COUNTDOWN_AT_SEPARATOR}{time_str}"
+        ))
     }
 
     /// Displays an error message on the error label and unhides it.
     pub fn show_error(&self, message: &str) {
         self.with_state(|state| {
-            state.error_label.setStringValue(&NSString::from_str(message));
+            state
+                .error_label
+                .setStringValue(&NSString::from_str(message));
             state.error_label.setHidden(false);
             state.time_label.setStringValue(&NSString::from_str(""));
             state.time_label.setHidden(true);
@@ -571,7 +589,11 @@ impl AppDelegate {
 
         // SAFETY: scheduledTimerWithTimeInterval_repeats_block is called on the main thread.
         let timer = unsafe {
-            NSTimer::scheduledTimerWithTimeInterval_repeats_block(COUNTDOWN_UPDATE_INTERVAL, true, &block)
+            NSTimer::scheduledTimerWithTimeInterval_repeats_block(
+                COUNTDOWN_UPDATE_INTERVAL,
+                true,
+                &block,
+            )
         };
         timer.setTolerance(COUNTDOWN_TIMER_TOLERANCE);
 

@@ -15,8 +15,8 @@ use std::time::{Duration, SystemTime};
 use app::app_delegate::AppDelegate;
 use app::ui::{
     DEFAULT_DURATION_TEXT, ERROR_DURATION_INVALID, TITLE_KEEP_DISPLAY_AWAKE,
-    TITLE_RUN_INDEFINITELY, TITLE_START, UNIT_DAYS_INDEX, UNIT_HOURS_INDEX,
-    UNIT_MINUTES_INDEX, build_content_view,
+    TITLE_RUN_INDEFINITELY, TITLE_START, UNIT_DAYS_INDEX, UNIT_HOURS_INDEX, UNIT_MINUTES_INDEX,
+    build_content_view,
 };
 use app_core::ipc::{IpcCommand, IpcResponse};
 use objc2::runtime::ProtocolObject;

@@ -144,7 +144,10 @@ mod tests {
                 &["melaffeine", "start", "2h", "--display"][..],
                 (Some("2h"), true, false),
             ),
-            (&["melaffeine", "start", "--indefinite"][..], (None, false, true)),
+            (
+                &["melaffeine", "start", "--indefinite"][..],
+                (None, false, true),
+            ),
         ] {
             let cli = Cli::try_parse_from(args).unwrap();
             let Commands::Start {

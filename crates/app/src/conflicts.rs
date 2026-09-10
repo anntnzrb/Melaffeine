@@ -24,4 +24,3 @@ pub fn detect_external_conflict() -> Option<String> {
     }
     None
 }
-

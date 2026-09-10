@@ -14,14 +14,47 @@ const ALL_UNITS: [DurationUnit; 4] = [
 fn parse_duration_rejects_invalid_inputs() {
     let invalid_inputs = [
         // Empty string and whitespace cases
-        "", " 1", "1 ", " 1 ", "\t1", "1\n", "\r\n1", " 100 ", "  ", "\t", "\n",
+        "",
+        " 1",
+        "1 ",
+        " 1 ",
+        "\t1",
+        "1\n",
+        "\r\n1",
+        " 100 ",
+        "  ",
+        "\t",
+        "\n",
         // Sign cases
-        "-1", "+1", "-0", "+0", "-525600", "+100",
+        "-1",
+        "+1",
+        "-0",
+        "+0",
+        "-525600",
+        "+100",
         // Non-numeric strings
-        "abc", "1a", "a1", "1.0", "0.5", "1.5", "1,000", "99_000", "!", "@#$", "1 0", "1e3",
-        "NaN", "inf", "-inf", "0x10", "0b10",
+        "abc",
+        "1a",
+        "a1",
+        "1.0",
+        "0.5",
+        "1.5",
+        "1,000",
+        "99_000",
+        "!",
+        "@#$",
+        "1 0",
+        "1e3",
+        "NaN",
+        "inf",
+        "-inf",
+        "0x10",
+        "0b10",
         // Zero cases
-        "0", "00", "000", "0000000000000",
+        "0",
+        "00",
+        "000",
+        "0000000000000",
         // Massive numeric strings and arithmetic overflow attempts
         "18446744073709551615",                 // u64::MAX
         "18446744073709551616",                 // u64::MAX + 1

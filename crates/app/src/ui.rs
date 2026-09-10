@@ -152,7 +152,12 @@ pub fn build_content_view(mtm: MainThreadMarker) -> PopoverControls {
     let duration_field =
         NSTextField::textFieldWithString(&NSString::from_str(DEFAULT_DURATION_TEXT), mtm);
     duration_field.setPlaceholderString(Some(&NSString::from_str(DURATION_PLACEHOLDER)));
-    place(&duration_field, DURATION_Y, DURATION_FIELD_WIDTH, TEXT_FIELD_HEIGHT);
+    place(
+        &duration_field,
+        DURATION_Y,
+        DURATION_FIELD_WIDTH,
+        TEXT_FIELD_HEIGHT,
+    );
 
     // 3. Unit popup button
     let unit_popup_frame = CGRect::new(
@@ -179,7 +184,12 @@ pub fn build_content_view(mtm: MainThreadMarker) -> PopoverControls {
             mtm,
         )
     };
-    place(&keep_display_awake_button, DISPLAY_AWAKE_Y, width, CHECKBOX_HEIGHT);
+    place(
+        &keep_display_awake_button,
+        DISPLAY_AWAKE_Y,
+        width,
+        CHECKBOX_HEIGHT,
+    );
 
     // 5. Countdown time label
     let time_label = NSTextField::labelWithString(&NSString::from_str(""), mtm);
@@ -193,7 +203,12 @@ pub fn build_content_view(mtm: MainThreadMarker) -> PopoverControls {
         NSButton::buttonWithTitle_target_action(&NSString::from_str(TITLE_START), None, None, mtm)
     };
     start_stop_button.setBezelStyle(NSBezelStyle::Rounded);
-    place(&start_stop_button, START_BUTTON_Y, START_BUTTON_WIDTH, BUTTON_HEIGHT);
+    place(
+        &start_stop_button,
+        START_BUTTON_Y,
+        START_BUTTON_WIDTH,
+        BUTTON_HEIGHT,
+    );
 
     // 7. Error label
     let error_label = NSTextField::labelWithString(&NSString::from_str(""), mtm);

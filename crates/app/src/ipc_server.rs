@@ -93,7 +93,9 @@ fn serve_connection(mut stream: UnixStream, requests: &SyncSender<Request>) {
     let _ = stream.set_read_timeout(Some(IPC_IO_TIMEOUT));
     let _ = stream.set_write_timeout(Some(IPC_IO_TIMEOUT));
 
-    let fail = |s: &mut UnixStream, msg: &[u8]| { let _ = s.write_all(msg); };
+    let fail = |s: &mut UnixStream, msg: &[u8]| {
+        let _ = s.write_all(msg);
+    };
 
     let mut frame = Vec::new();
     let read = BufReader::new((&stream).take(MAX_COMMAND_READ_BYTES)).read_until(b'\n', &mut frame);
@@ -275,7 +277,11 @@ mod tests {
 
     #[test]
     fn newline_free_frame_times_out() -> Result<(), Box<dyn std::error::Error>> {
-        run_server(b"STATUS", IPC_IO_TIMEOUT.saturating_mul(2), b"ERR invalid frame\n")
+        run_server(
+            b"STATUS",
+            IPC_IO_TIMEOUT.saturating_mul(2),
+            b"ERR invalid frame\n",
+        )
     }
 
     #[test]
