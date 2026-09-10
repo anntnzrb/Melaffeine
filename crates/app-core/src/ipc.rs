@@ -82,47 +82,44 @@ impl IpcCommand {
         let mut parts = trimmed.split_whitespace();
         let action = parts.next()?;
 
-        if action.eq_ignore_ascii_case("STOP") && parts.next().is_none() {
-            Some(Self::Stop)
-        } else if action.eq_ignore_ascii_case("TOGGLE") && parts.next().is_none() {
-            Some(Self::Toggle)
-        } else if action.eq_ignore_ascii_case("STATUS") && parts.next().is_none() {
-            Some(Self::Status)
-        } else if action.eq_ignore_ascii_case("QUIT") && parts.next().is_none() {
-            Some(Self::Quit)
-        } else if action.eq_ignore_ascii_case("START") {
-            let mut duration: Option<Duration> = None;
-            let mut duration_seen = false;
-            let mut keep_display_awake = false;
+        match action.to_ascii_uppercase().as_str() {
+            "STOP" if parts.next().is_none() => Some(Self::Stop),
+            "TOGGLE" if parts.next().is_none() => Some(Self::Toggle),
+            "STATUS" if parts.next().is_none() => Some(Self::Status),
+            "QUIT" if parts.next().is_none() => Some(Self::Quit),
+            "START" => {
+                let mut duration: Option<Duration> = None;
+                let mut duration_seen = false;
+                let mut keep_display_awake = false;
 
-            for part in parts {
-                if part.eq_ignore_ascii_case("display") {
-                    if keep_display_awake {
+                for part in parts {
+                    if part.eq_ignore_ascii_case("display") {
+                        if keep_display_awake {
+                            return None;
+                        }
+                        keep_display_awake = true;
+                    } else if part.eq_ignore_ascii_case("indefinite") {
+                        if duration_seen {
+                            return None;
+                        }
+                        duration_seen = true;
+                    } else if let Some(parsed) = parse_duration_spec(part) {
+                        if duration_seen {
+                            return None;
+                        }
+                        duration_seen = true;
+                        duration = Some(parsed);
+                    } else {
                         return None;
                     }
-                    keep_display_awake = true;
-                } else if part.eq_ignore_ascii_case("indefinite") {
-                    if duration_seen {
-                        return None;
-                    }
-                    duration_seen = true;
-                } else if let Some(parsed) = parse_duration_spec(part) {
-                    if duration_seen {
-                        return None;
-                    }
-                    duration_seen = true;
-                    duration = Some(parsed);
-                } else {
-                    return None;
                 }
-            }
 
-            Some(Self::Start {
-                duration,
-                keep_display_awake,
-            })
-        } else {
-            None
+                Some(Self::Start {
+                    duration,
+                    keep_display_awake,
+                })
+            }
+            _ => None,
         }
     }
 }
@@ -135,43 +132,15 @@ pub fn parse_duration_spec(spec: &str) -> Option<Duration> {
         return None;
     }
 
-    if let Some(num) = trimmed
-        .strip_suffix('s')
-        .or_else(|| trimmed.strip_suffix('S'))
-    {
-        if num.is_empty() || !num.bytes().all(|b| b.is_ascii_digit()) {
-            return None;
-        }
-        let secs = num.parse::<u64>().ok()?;
-        if secs == 0 || secs > 31_536_000 {
-            return None;
-        }
-        return Some(Duration::from_secs(secs));
-    }
+    let (num, unit) = match trimmed.chars().last() {
+        Some('s' | 'S') => (trimmed.strip_suffix(['s', 'S'])?, DurationUnit::Seconds),
+        Some('m' | 'M') => (trimmed.strip_suffix(['m', 'M'])?, DurationUnit::Minutes),
+        Some('h' | 'H') => (trimmed.strip_suffix(['h', 'H'])?, DurationUnit::Hours),
+        Some('d' | 'D') => (trimmed.strip_suffix(['d', 'D'])?, DurationUnit::Days),
+        _ => (trimmed, DurationUnit::Minutes),
+    };
 
-    if let Some(num) = trimmed
-        .strip_suffix('m')
-        .or_else(|| trimmed.strip_suffix('M'))
-    {
-        return parse_duration(num, DurationUnit::Minutes);
-    }
-
-    if let Some(num) = trimmed
-        .strip_suffix('h')
-        .or_else(|| trimmed.strip_suffix('H'))
-    {
-        return parse_duration(num, DurationUnit::Hours);
-    }
-
-    if let Some(num) = trimmed
-        .strip_suffix('d')
-        .or_else(|| trimmed.strip_suffix('D'))
-    {
-        return parse_duration(num, DurationUnit::Days);
-    }
-
-    // Default to minutes if bare number
-    parse_duration(trimmed, DurationUnit::Minutes)
+    parse_duration(num, unit)
 }
 
 /// Structured response sent from the application back to the CLI.
@@ -223,6 +192,10 @@ impl IpcResponse {
         clippy::question_mark
     )]
     pub fn parse(line: &str) -> Option<Self> {
+        fn set_once<T>(slot: &mut Option<T>, value: T) -> Option<()> {
+            slot.is_none().then(|| *slot = Some(value))
+        }
+
         let trimmed = line.trim();
         if let Some(rest) = trimmed.strip_prefix("OK ") {
             Some(Self::Ok(rest.to_string()))
@@ -240,33 +213,23 @@ impl IpcResponse {
 
             for part in rest.split_whitespace() {
                 if let Some(value) = part.strip_prefix("active=") {
-                    let value = value.parse::<bool>().ok()?;
-                    if is_active.replace(value).is_some() {
-                        return None;
-                    }
+                    set_once(&mut is_active, value.parse::<bool>().ok()?)?;
                 } else if let Some(value) = part.strip_prefix("display=") {
-                    let value = value.parse::<bool>().ok()?;
-                    if keep_display_awake.replace(value).is_some() {
-                        return None;
-                    }
+                    set_once(&mut keep_display_awake, value.parse::<bool>().ok()?)?;
                 } else if let Some(value) = part.strip_prefix("ends_at=") {
                     let value = if value == "none" {
                         None
                     } else {
                         Some(value.parse::<u64>().ok()?)
                     };
-                    if ends_at_unix.replace(value).is_some() {
-                        return None;
-                    }
+                    set_once(&mut ends_at_unix, value)?;
                 } else if let Some(value) = part.strip_prefix("remaining=") {
                     let value = if value == "none" {
                         None
                     } else {
                         Some(value.replace('_', " "))
                     };
-                    if remaining_compact.replace(value).is_some() {
-                        return None;
-                    }
+                    set_once(&mut remaining_compact, value)?;
                 } else {
                     return None;
                 }

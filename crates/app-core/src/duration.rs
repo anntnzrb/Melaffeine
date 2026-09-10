@@ -12,6 +12,7 @@ pub const HOURS_PER_DAY: u64 = 24;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DurationUnit {
+    Seconds,
     Minutes,
     Hours,
     Days,
@@ -19,33 +20,18 @@ pub enum DurationUnit {
 
 #[must_use]
 pub fn parse_duration(input: &str, unit: DurationUnit) -> Option<Duration> {
-    if input.is_empty() {
+    if input.is_empty() || !input.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
 
-    let mut value: u64 = 0;
-    for b in input.bytes() {
-        let digit = match b {
-            b'0' => 0_u64,
-            b'1' => 1_u64,
-            b'2' => 2_u64,
-            b'3' => 3_u64,
-            b'4' => 4_u64,
-            b'5' => 5_u64,
-            b'6' => 6_u64,
-            b'7' => 7_u64,
-            b'8' => 8_u64,
-            b'9' => 9_u64,
-            _ => return None,
-        };
-        value = value.checked_mul(10)?.checked_add(digit)?;
-    }
+    let value = input.parse::<u64>().ok()?;
 
     if value < MIN_DURATION_VALUE {
         return None;
     }
 
     let multiplier = match unit {
+        DurationUnit::Seconds => 1,
         DurationUnit::Minutes => SECONDS_PER_MINUTE,
         DurationUnit::Hours => SECONDS_PER_HOUR,
         DurationUnit::Days => SECONDS_PER_DAY,
