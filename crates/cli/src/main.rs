@@ -1,12 +1,15 @@
 //! Melaffeine CLI controller for managing sleep prevention sessions.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::process::ExitCode;
 use std::time::Duration;
 
 use app_core::ipc::{IpcCommand, IpcResponse, parse_duration_spec, socket_path};
 use clap::{Parser, Subcommand};
+
+/// Maximum bytes read for a single IPC response line.
+const MAX_RESPONSE_BYTES: u64 = 4_097;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -109,12 +112,16 @@ fn send_ipc_command(command: &IpcCommand) -> Result<IpcResponse, String> {
         )
     })?;
 
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .map_err(|e| format!("Failed to configure socket: {e}"))?;
+
     let line = command.serialize();
     stream
         .write_all(line.as_bytes())
         .map_err(|e| format!("Failed to send command: {e}"))?;
 
-    let mut reader = BufReader::new(&stream);
+    let mut reader = BufReader::new((&stream).take(MAX_RESPONSE_BYTES));
     let mut response_line = String::new();
     reader
         .read_line(&mut response_line)
