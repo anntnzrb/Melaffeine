@@ -28,7 +28,10 @@
       commonArgs = {
         inherit src;
         strictDeps = true;
-        nativeBuildInputs = [ pkgs.darwin.cctools pkgs.darwin.sigtool ];
+        nativeBuildInputs = [
+          pkgs.darwin.cctools
+          pkgs.darwin.sigtool
+        ];
         buildInputs = darwinFrameworks;
         MACOSX_DEPLOYMENT_TARGET = "14.0";
       };
