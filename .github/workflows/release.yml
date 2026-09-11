@@ -53,7 +53,7 @@ jobs:
           # Stage bundle and CLI binary for zip distribution
           cp -R result-app/Applications/Melaffeine.app staging/
           cp result-cli/bin/melaffeine staging/melaffeine
-          chmod +x staging/melaffeine
+          chmod -R u+w staging
           codesign --force --sign - staging/Melaffeine.app
           codesign --force --sign - staging/melaffeine
           # Package App bundle + CLI into zip (for Homebrew Cask and manual download)
@@ -61,7 +61,7 @@ jobs:
 
           # Copy standalone CLI binary
           cp result-cli/bin/melaffeine release-artifacts/melaffeine-cli-aarch64-apple-darwin
-          chmod +x release-artifacts/melaffeine-cli-aarch64-apple-darwin
+          chmod u+w,+x release-artifacts/melaffeine-cli-aarch64-apple-darwin
           codesign --force --sign - release-artifacts/melaffeine-cli-aarch64-apple-darwin
           test "$(release-artifacts/melaffeine-cli-aarch64-apple-darwin --version)" = "melaffeine ${VERSION}"
 
