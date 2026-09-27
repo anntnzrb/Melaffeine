@@ -24,7 +24,7 @@ jobs:
     if: "!contains(github.event.head_commit.message, '[skip release]')"
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Determine Monotonic Version
         run: |
@@ -74,7 +74,7 @@ jobs:
           cd ..
 
       - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ env.TAG_NAME }}
           target_commitish: ${{ github.sha }}
@@ -87,7 +87,7 @@ jobs:
           make_latest: true
 
       - name: Update Homebrew Tap
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: 'anntnzrb/homebrew-tap'
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
