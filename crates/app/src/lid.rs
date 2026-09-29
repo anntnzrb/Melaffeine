@@ -33,8 +33,8 @@
 //! `/usr/bin/sudo -n /usr/bin/pmset -a disablesleep 0` to restore normal sleep behavior.
 //! This avoids periodic timer wakeups on battery and eliminates PID-reuse races.
 //!
-//! When [`LidSession`] drops normally, it turns off `disablesleep` via `pmset` and
-//! closes the pipe write end, allowing the watchdog process to complete and exit cleanly.
+//! When [`LidSession`] drops normally, it turns off `disablesleep` via `pmset`,
+//! terminates the watchdog process, and reaps it.
 //!
 //! # Uninstallation
 //!
@@ -69,7 +69,7 @@ pub fn authorize() -> Result<(), String> {
         return Err(format!("Authorization failed: {trimmed}"));
     }
 
-    set_sleep_disabled(false).map_err(|_| String::from("Authorization was not verified."))
+    set_sleep_disabled(false).map_err(|e| format!("Authorization was not verified: {e}"))
 }
 
 /// Active lid-closed mode. While alive, `disablesleep` is 1. `Drop` sets it back to 0 and releases the watchdog.
@@ -124,11 +124,15 @@ impl Drop for LidSession {
     fn drop(&mut self) {
         if let Err(err) = set_sleep_disabled(false) {
             eprintln!("Failed to reset disablesleep on drop: {err}");
+            // The explicit reset failed; leave the watchdog alive and let the dropped
+            // stdin pipe trigger its EOF reset as a fallback (accepting the unreaped
+            // child in this rare error path).
+            return;
         }
-        // Dropping `self._stdin` (which happens next automatically when this struct drops)
-        // closes the pipe write end, causing the watchdog's `read _` to see EOF and run
-        // its reset as a second attempt. We do not kill the watchdog.
-        let _ = self.watchdog.try_wait();
+        // The explicit reset is the clean-exit path; kill and reap the watchdog
+        // so its delayed reset does not clobber subsequent sessions.
+        let _ = self.watchdog.kill();
+        let _ = self.watchdog.wait();
     }
 }
 

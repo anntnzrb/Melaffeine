@@ -20,14 +20,18 @@ use objc2::rc::{Retained, Weak};
 use objc2::runtime::AnyObject;
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSApplication, NSApplicationDelegate, NSButton, NSControl, NSControlStateValueOn, NSEvent,
-    NSEventMask, NSEventType, NSImage, NSMenu, NSMenuItem, NSPopover, NSPopoverBehavior,
-    NSStatusBar, NSStatusBarButton, NSStatusItem, NSVariableStatusItemLength, NSViewController,
+    NSApplication, NSApplicationDelegate, NSButton, NSControlStateValueOn, NSEvent, NSEventMask,
+    NSEventType, NSImage, NSMenu, NSMenuItem, NSPopover, NSPopoverBehavior, NSStatusBar,
+    NSStatusBarButton, NSStatusItem, NSVariableStatusItemLength, NSViewController,
 };
 use objc2_foundation::{
     NSDate, NSDateFormatter, NSDateFormatterStyle, NSNotification, NSObject, NSObjectProtocol,
     NSRectEdge, NSSize, NSString, NSTimer,
 };
+
+const ERROR_THERMAL_TOO_HOT: &str =
+    "Mac is too hot to keep running with the lid closed. Let it cool down and try again.";
+
 /// Owned `AppKit` state and controllers for the status item, popover, and timers.
 pub struct AppState {
     /// Native status item in the menu bar.
@@ -98,31 +102,15 @@ define_class!(
             self.toggle_popover_relative_to(sender);
         }
 
-        /// Toggles popover or updates input enable states on control modification.
-        #[unsafe(method(controlChanged:))]
-        fn control_changed(&self, _sender: &NSControl) {
-            self.clear_error();
-            self.with_state(|state| {
-                if state.controls.no_time_limit_button.state() == NSControlStateValueOn
-                    && state.controls.awake_mode() == AwakeMode::LidClosed
-                {
-                    state.controls.set_awake_mode(AwakeMode::SystemOnly);
-                }
-            });
-            self.update_ui();
-        }
-
         /// Handles awake mode radio button selection changes.
         #[unsafe(method(awakeModeChanged:))]
         fn awake_mode_changed(&self, _sender: &NSButton) {
             self.clear_error();
-            self.update_ui();
         }
 
         /// Handles changes to the "No time limit" checkbox.
         #[unsafe(method(noTimeLimitChanged:))]
         fn no_time_limit_changed(&self, _sender: &NSButton) {
-            self.clear_error();
             self.with_state(|state| {
                 if state.controls.no_time_limit_button.state() == NSControlStateValueOn
                     && state.controls.awake_mode() == AwakeMode::LidClosed
@@ -130,15 +118,13 @@ define_class!(
                     state.controls.set_awake_mode(AwakeMode::SystemOnly);
                 }
             });
-            self.update_ui();
+            self.clear_error();
         }
 
         /// Handles clicks on the primary Start / Stop button.
         #[unsafe(method(startStopClicked:))]
         fn start_stop_clicked(&self, _sender: &NSButton) {
-            if let Err(error) = self.handle_start_stop(true) {
-                self.show_error(&error);
-            }
+            let _ = self.handle_start_stop(true);
         }
         /// Terminates the application when Quit is clicked in the context menu.
         #[unsafe(method(quit:))]
@@ -340,6 +326,14 @@ impl AppDelegate {
     ///
     /// Returns `Ok(true)` if sleep prevention was started, `Ok(false)` if stopped.
     pub fn handle_start_stop(&self, interactive: bool) -> Result<bool, String> {
+        let result = self.try_start_stop(interactive);
+        if let Err(error) = &result {
+            self.show_error(error);
+        }
+        result
+    }
+
+    fn try_start_stop(&self, interactive: bool) -> Result<bool, String> {
         let (is_active, duration, mode) = self
             .with_state(
                 |state| -> Result<(bool, Option<Duration>, AwakeMode), String> {
@@ -382,28 +376,19 @@ impl AppDelegate {
             let keep_display = mode == AwakeMode::Display;
 
             let lid_session = if use_lid {
+                if crate::lid::thermal_too_hot() {
+                    return Err(String::from(ERROR_THERMAL_TOO_HOT));
+                }
                 match crate::lid::LidSession::start() {
                     Ok(session) => Some(session),
                     Err(_start_err) => {
-                        if interactive {
-                            if let Err(auth_err) = crate::lid::authorize() {
-                                self.show_error(&auth_err);
-                                return Err(auth_err);
-                            }
-                            match crate::lid::LidSession::start() {
-                                Ok(session) => Some(session),
-                                Err(retry_err) => {
-                                    self.show_error(&retry_err);
-                                    return Err(retry_err);
-                                }
-                            }
-                        } else {
-                            let err_msg = String::from(
+                        if !interactive {
+                            return Err(String::from(
                                 "Open Melaffeine and click Start once to set up lid-closed mode.",
-                            );
-                            self.show_error(&err_msg);
-                            return Err(err_msg);
+                            ));
                         }
+                        crate::lid::authorize()?;
+                        Some(crate::lid::LidSession::start()?)
                     }
                 }
             } else {
@@ -412,17 +397,21 @@ impl AppDelegate {
 
             if let Err(power_err) = self.start_session(duration, keep_display) {
                 drop(lid_session);
-                self.show_error(&power_err);
                 return Err(power_err);
             }
 
             if let Some(session) = lid_session {
                 let timer =
                     self.schedule_timer(THERMAL_CHECK_INTERVAL, true, Self::check_thermal_state);
-                self.with_state_mut(|state| {
-                    state.lid = Some(session);
-                    state.thermal_timer = Some(timer);
-                });
+                let prev_lid = self
+                    .with_state_mut(|state| {
+                        let prev = Self::take_lid_session(state);
+                        state.lid = Some(session);
+                        state.thermal_timer = Some(timer);
+                        prev
+                    })
+                    .flatten();
+                drop(prev_lid);
             }
 
             Ok(true)
@@ -435,15 +424,17 @@ impl AppDelegate {
         duration_opt: Option<Duration>,
         keep_display: bool,
     ) -> Result<(), String> {
-        let start_result = self
+        let (lid, start_result) = self
             .with_state_mut(|state| {
                 state.error_message = None;
-                Self::invalidate_timers(state);
-                state
+                let lid = Self::invalidate_timers(state);
+                let result = state
                     .power
-                    .start(duration_opt, keep_display, SystemTime::now())
+                    .start(duration_opt, keep_display, SystemTime::now());
+                (lid, result)
             })
             .ok_or_else(|| String::from("App state not initialized"))?;
+        drop(lid);
 
         if let Err(error) = start_result {
             self.update_ui();
@@ -522,10 +513,14 @@ impl AppDelegate {
 
     /// Stops the active session (power assertion and timers) and updates UI.
     pub fn stop_session(&self) {
-        self.with_state_mut(|state| {
-            Self::invalidate_timers(state);
-            state.power.stop();
-        });
+        let lid = self
+            .with_state_mut(|state| {
+                let lid = Self::invalidate_timers(state);
+                state.power.stop();
+                lid
+            })
+            .flatten();
+        drop(lid);
         self.update_ui();
     }
 
@@ -772,36 +767,42 @@ impl AppDelegate {
     fn check_thermal_state(&self) {
         let has_lid = self.with_state(|s| s.lid.is_some()).unwrap_or(false);
         if !has_lid {
-            self.with_state_mut(Self::clear_lid_session);
+            let lid = self.with_state_mut(Self::take_lid_session).flatten();
+            drop(lid);
             return;
         }
         if crate::lid::thermal_too_hot() {
-            self.with_state_mut(|state| {
-                Self::clear_lid_session(state);
-                state.controls.set_awake_mode(AwakeMode::SystemOnly);
-                state.error_message = Some(String::from(NOTICE_THERMAL_CUTOFF));
-            });
+            let lid = self
+                .with_state_mut(|state| {
+                    let lid = Self::take_lid_session(state);
+                    state.controls.set_awake_mode(AwakeMode::SystemOnly);
+                    state.error_message = Some(String::from(NOTICE_THERMAL_CUTOFF));
+                    lid
+                })
+                .flatten();
+            drop(lid);
             self.update_ui();
         }
     }
 
-    /// Drops the active lid-closed session and invalidates its thermal guard timer.
-    fn clear_lid_session(state: &mut AppState) {
+    /// Takes the active lid-closed session and invalidates its thermal guard timer.
+    fn take_lid_session(state: &mut AppState) -> Option<crate::lid::LidSession> {
         if let Some(timer) = state.thermal_timer.take() {
             timer.invalidate();
         }
-        state.lid = None;
+        state.lid.take()
     }
 
-    /// Invalidates and releases the expiry, countdown, and thermal timers, and drops any lid session.
-    fn invalidate_timers(state: &mut AppState) {
-        Self::clear_lid_session(state);
+    /// Invalidates the expiry, countdown, and thermal timers, returning any lid session.
+    fn invalidate_timers(state: &mut AppState) -> Option<crate::lid::LidSession> {
+        let lid = Self::take_lid_session(state);
         if let Some(timer) = state.expiry_timer.take() {
             timer.invalidate();
         }
         if let Some(timer) = state.countdown_timer.take() {
             timer.invalidate();
         }
+        lid
     }
 
     /// Tears down app state and terminates the shared application.

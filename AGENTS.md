@@ -154,6 +154,6 @@ Functional QA checklist:
 - "Keep running with lid closed" radio is disabled when "No time limit" is checked (and checking No time limit resets mode to "Let the screen turn off")
 - first use of lid-closed mode from the popover Start button shows the macOS administrator password prompt once
 - CLI never triggers the password prompt (non-interactive lid start returns an error directing user to open popover)
-- a second launch exits immediately and leaves the first instance untouched (probes IPC status before modifying system state or creating UI)
+- a second launch exits immediately and leaves the first instance untouched (acquires exclusive advisory file lock before modifying system state or creating UI)
 - `pmset -g | grep SleepDisabled` shows `1` while active and `0` after Stop, expiry, and Quit
 - after `kill -9` of the app, `SleepDisabled` returns to `0` instantly via watchdog pipe EOF (`read _`)
