@@ -230,9 +230,9 @@ fn main() {
     delegate.update_ui();
     assert_eq!(error_label.stringValue().to_string(), "Test Error Message");
     assert!(!error_label.isHidden());
-    // Action handler: controlChanged clears error
+    // Action handler: noTimeLimitChanged clears error
     unsafe {
-        let _: () = msg_send![&*delegate, controlChanged: &*duration_field];
+        let _: () = msg_send![&*delegate, noTimeLimitChanged: &*no_time_limit_button];
     }
     assert_eq!(error_label.stringValue().to_string(), "");
     assert!(error_label.isHidden());
@@ -291,7 +291,6 @@ fn main() {
         delegate.handle_start_stop(true),
         Err(String::from(ERROR_DURATION_INVALID))
     );
-    delegate.show_error(ERROR_DURATION_INVALID);
     assert_eq!(
         error_label.stringValue().to_string(),
         ERROR_DURATION_INVALID
