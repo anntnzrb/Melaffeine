@@ -22,24 +22,25 @@ alias cov := coverage
 default:
     @just --list
 
-# build release app bundle and ad-hoc sign
-build:
-    cargo build --release --package app --bin {{ app_name }}
+# assemble app bundle from built binary and ad-hoc sign
+[private]
+bundle profile:
     rm -rf "{{ app }}"
     mkdir -p "{{ app }}/Contents/MacOS"
-    cp "target/release/{{ app_name }}" "{{ bin }}"
+    cp "target/{{ profile }}/{{ app_name }}" "{{ bin }}"
     cp "Resources/Info.plist" "{{ plist }}"
     {{ xattr }} "{{ app }}"
     {{ codesign }} "{{ app }}"
+
+# build release app bundle and ad-hoc sign
+build:
+    cargo build --release --package app --bin {{ app_name }}
+    @just bundle release
     printf 'Created %s\n' "{{ app }}"
 
 # run workspace tests via cargo-nextest
 test *args:
     cargo nextest run --workspace {{ args }}
-
-[private]
-refresh-lock:
-    cargo metadata --format-version 1 >/dev/null
 
 # run workspace code coverage via cargo-llvm-cov
 coverage *args:
@@ -48,23 +49,13 @@ coverage *args:
 # build debug app bundle and launch Melaffeine in the foreground
 run:
     cargo build --package app --bin {{ app_name }}
-    rm -rf "{{ app }}"
-    mkdir -p "{{ app }}/Contents/MacOS"
-    cp "target/debug/{{ app_name }}" "{{ bin }}"
-    cp "Resources/Info.plist" "{{ plist }}"
-    {{ xattr }} "{{ app }}"
-    {{ codesign }} "{{ app }}"
+    @just bundle debug
     "{{ bin }}"
 
 # run Melaffeine CLI controller
 cli *args:
     cargo run --package melaffeine-cli --bin melaffeine -- {{ args }}
 
-# configure git to use checked-in .githooks
-install-hooks:
-    git config core.hooksPath .githooks
-    chmod +x .githooks/*
-    printf 'Git hooks installed from .githooks\n'
 # remove target, result, and generated bundle artifacts
 clean:
     cargo clean

@@ -42,7 +42,7 @@ jobs:
           /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${VERSION}" Resources/Info.plist
           /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${{ github.run_number }}" Resources/Info.plist
           sed -i '' -E '/^\[workspace.package\]$/,/^\[/ s/^version = ".*"$/version = "'"${VERSION}"'"/' Cargo.toml
-          nix develop -c just refresh-lock
+          nix develop -c cargo metadata --format-version 1 >/dev/null
 
       - name: Build Melaffeine.app and CLI via Nix
         run: |
@@ -56,13 +56,10 @@ jobs:
           chmod -R u+w staging
           codesign --force --sign - staging/Melaffeine.app
           codesign --force --sign - staging/melaffeine
-          # Package App bundle + CLI into zip (for Homebrew Cask and manual download)
           ditto -c -k staging release-artifacts/Melaffeine-aarch64-apple-darwin.zip
 
           # Copy standalone CLI binary
-          cp result-cli/bin/melaffeine release-artifacts/melaffeine-cli-aarch64-apple-darwin
-          chmod u+w,+x release-artifacts/melaffeine-cli-aarch64-apple-darwin
-          codesign --force --sign - release-artifacts/melaffeine-cli-aarch64-apple-darwin
+          cp staging/melaffeine release-artifacts/melaffeine-cli-aarch64-apple-darwin
           test "$(release-artifacts/melaffeine-cli-aarch64-apple-darwin --version)" = "melaffeine ${VERSION}"
 
           # Compute Checksums
