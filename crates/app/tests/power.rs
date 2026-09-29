@@ -3,7 +3,6 @@
     clippy::arithmetic_side_effects,
     clippy::duration_suboptimal_units,
     clippy::significant_drop_tightening,
-    clippy::assert_is_empty,
     clippy::clone_on_copy,
     dead_code
 )]

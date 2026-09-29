@@ -108,14 +108,14 @@ crates/app/src/lid.rs                    Lid-closed mode, sudoers setup, and wat
 crates/cli/src/main.rs                   CLI controller entry point
 Resources/Info.plist                     Bundle Info.plist definition
 justfile                                 Primary command runner (POSIX /bin/sh)
-flake.nix                                Pinned Nix flake using flake-parts, crane, fenix
+flake.nix                                Pinned Nix flake using flake-parts, crane, fenix (stable toolchain)
 nix/parts/                               Modular Nix flake definitions
 ```
 
 ## Runtime/Tooling Preferences
 
 - Target platform: macOS 14+ (`MACOSX_DEPLOYMENT_TARGET = "14.0"`).
-- Packaging via Crane and Fenix in Nix flake.
+- Packaging via Crane and the Fenix stable toolchain in the Nix flake.
 - Local bundle packaging via `just build` uses `Resources/Info.plist` and ad-hoc codesigning.
 - Testing via `cargo nextest`.
 

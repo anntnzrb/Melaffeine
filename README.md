@@ -60,5 +60,5 @@ just cli stop        # stop active session via CLI
 - Rust 2024
 - AppKit `NSStatusItem` / `NSPopover` via `objc2`
 - ServiceManagement: none (pure ephemeral runtime)
-- Nix flake with Crane & Fenix
+- Nix flake with Crane & Fenix (stable toolchain)
 - `clap` CLI controller for scriptable sleep assertions
