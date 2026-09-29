@@ -27,12 +27,16 @@ objc2-foundation = { workspace = true, features = [
     "block2",
 ] }
 objc2-app-kit = { workspace = true, features = [
+    "NSAppearance",
     "NSApplication",
+    "NSBitmapImageRep",
     "NSButton",
     "NSColor",
     "NSControl",
     "NSEvent",
+    "NSGraphics",
     "NSImage",
+    "NSImageRep",
     "NSMenu",
     "NSPopover",
     "NSPopUpButton",
@@ -44,6 +48,7 @@ objc2-app-kit = { workspace = true, features = [
     "NSTextField",
     "NSView",
     "NSViewController",
+    "NSWindow",
     "block2",
 ] }
 objc2-io-kit = { workspace = true, features = ["pwr_mgt"] }

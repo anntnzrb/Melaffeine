@@ -8,10 +8,9 @@ use crate::iokit::IOKitProvider;
 use crate::ipc_server::IpcServer;
 use crate::power::PowerController;
 use crate::ui::{
-    COUNTDOWN_AT_SEPARATOR, COUNTDOWN_STOPS_IN_PREFIX, COUNTDOWN_TIMER_TOLERANCE,
-    COUNTDOWN_UPDATE_INTERVAL, ERROR_DURATION_INVALID, MENU_HEIGHT, MENU_WIDTH,
-    NOTICE_THERMAL_CUTOFF, PopoverControls, THERMAL_CHECK_INTERVAL, TITLE_QUIT, UNIT_DAYS_INDEX,
-    UNIT_MINUTES_INDEX, build_content_view, compute_ui_projection,
+    AwakeMode, COUNTDOWN_TIMER_TOLERANCE, COUNTDOWN_UPDATE_INTERVAL, ERROR_DURATION_INVALID,
+    MENU_WIDTH, NOTICE_THERMAL_CUTOFF, PopoverControls, THERMAL_CHECK_INTERVAL, TITLE_QUIT,
+    UNIT_DAYS_INDEX, UNIT_MINUTES_INDEX, build_content_view, compute_ui_projection,
 };
 use app_core::duration::{DurationUnit, format_compact_duration, parse_duration};
 use app_core::ipc::{IpcCommand, IpcResponse, SessionStatus, socket_path};
@@ -103,17 +102,44 @@ define_class!(
         #[unsafe(method(controlChanged:))]
         fn control_changed(&self, _sender: &NSControl) {
             self.clear_error();
+            self.with_state(|state| {
+                if state.controls.no_time_limit_button.state() == NSControlStateValueOn
+                    && state.controls.awake_mode() == AwakeMode::LidClosed
+                {
+                    state.controls.set_awake_mode(AwakeMode::SystemOnly);
+                }
+            });
+            self.update_ui();
+        }
+
+        /// Handles awake mode radio button selection changes.
+        #[unsafe(method(awakeModeChanged:))]
+        fn awake_mode_changed(&self, _sender: &NSButton) {
+            self.clear_error();
+            self.update_ui();
+        }
+
+        /// Handles changes to the "No time limit" checkbox.
+        #[unsafe(method(noTimeLimitChanged:))]
+        fn no_time_limit_changed(&self, _sender: &NSButton) {
+            self.clear_error();
+            self.with_state(|state| {
+                if state.controls.no_time_limit_button.state() == NSControlStateValueOn
+                    && state.controls.awake_mode() == AwakeMode::LidClosed
+                {
+                    state.controls.set_awake_mode(AwakeMode::SystemOnly);
+                }
+            });
             self.update_ui();
         }
 
         /// Handles clicks on the primary Start / Stop button.
         #[unsafe(method(startStopClicked:))]
         fn start_stop_clicked(&self, _sender: &NSButton) {
-            if let Err(error) = self.handle_start_stop() {
+            if let Err(error) = self.handle_start_stop(true) {
                 self.show_error(&error);
             }
         }
-
         /// Terminates the application when Quit is clicked in the context menu.
         #[unsafe(method(quit:))]
         fn quit(&self, _sender: Option<&AnyObject>) {
@@ -148,20 +174,31 @@ impl AppDelegate {
         }
         let popover = NSPopover::new(mtm);
         popover.setBehavior(NSPopoverBehavior::Transient);
-        popover.setContentSize(NSSize::new(MENU_WIDTH, MENU_HEIGHT));
-
         let controls = build_content_view(mtm);
+        let height = controls.layout_footer();
+        popover.setContentSize(NSSize::new(MENU_WIDTH, height));
 
         // SAFETY: setTarget and setAction are called on the main thread.
         unsafe {
-            controls.indefinite_button.setTarget(Some(self));
+            controls.no_time_limit_button.setTarget(Some(self));
             controls
-                .indefinite_button
-                .setAction(Some(sel!(controlChanged:)));
-            controls.lid_closed_button.setTarget(Some(self));
+                .no_time_limit_button
+                .setAction(Some(sel!(noTimeLimitChanged:)));
+
+            controls.mode_system_button.setTarget(Some(self));
             controls
-                .lid_closed_button
-                .setAction(Some(sel!(controlChanged:)));
+                .mode_system_button
+                .setAction(Some(sel!(awakeModeChanged:)));
+
+            controls.mode_display_button.setTarget(Some(self));
+            controls
+                .mode_display_button
+                .setAction(Some(sel!(awakeModeChanged:)));
+
+            controls.mode_lid_button.setTarget(Some(self));
+            controls
+                .mode_lid_button
+                .setAction(Some(sel!(awakeModeChanged:)));
 
             controls.start_stop_button.setTarget(Some(self));
             controls
@@ -302,24 +339,26 @@ impl AppDelegate {
     /// Starts or updates power assertion based on UI inputs.
     ///
     /// Returns `Ok(true)` if sleep prevention was started, `Ok(false)` if stopped.
-    pub fn handle_start_stop(&self) -> Result<bool, String> {
-        let (is_active, duration, keep_display, lid_closed) = self
+    pub fn handle_start_stop(&self, interactive: bool) -> Result<bool, String> {
+        let (is_active, duration, mode) = self
             .with_state(
-                |state| -> Result<(bool, Option<Duration>, bool, bool), String> {
+                |state| -> Result<(bool, Option<Duration>, AwakeMode), String> {
                     let is_active = state.power.is_active();
                     if is_active {
-                        return Ok((true, None, false, false));
+                        return Ok((true, None, AwakeMode::SystemOnly));
                     }
 
-                    let indefinite =
-                        state.controls.indefinite_button.state() == NSControlStateValueOn;
-                    let keep_display =
-                        state.controls.keep_display_awake_button.state() == NSControlStateValueOn;
-                    let lid_closed = !indefinite
-                        && state.controls.lid_closed_button.state() == NSControlStateValueOn;
+                    let no_time_limit =
+                        state.controls.no_time_limit_button.state() == NSControlStateValueOn;
+                    let mode = state.controls.awake_mode();
 
-                    if indefinite {
-                        Ok((false, None, keep_display, false))
+                    if no_time_limit {
+                        let effective_mode = if mode == AwakeMode::LidClosed {
+                            AwakeMode::SystemOnly
+                        } else {
+                            mode
+                        };
+                        Ok((false, None, effective_mode))
                     } else {
                         let input = state.controls.duration_field.stringValue().to_string();
                         let unit = match state.controls.unit_popup.indexOfSelectedItem() {
@@ -329,44 +368,63 @@ impl AppDelegate {
                         };
                         let duration = parse_duration(input.trim(), unit)
                             .ok_or_else(|| String::from(ERROR_DURATION_INVALID))?;
-                        Ok((false, Some(duration), keep_display, lid_closed))
+                        Ok((false, Some(duration), mode))
                     }
                 },
             )
             .ok_or_else(|| String::from("App state not initialized"))??;
+
         if is_active {
             self.stop_session();
             Ok(false)
         } else {
-            let use_lid = duration.is_some() && lid_closed;
-            if use_lid
-                && !crate::lid::is_authorized()
-                && let Err(err) = crate::lid::authorize()
-            {
-                self.show_error(&err);
-                return Err(err);
-            }
-            self.start_session(duration, keep_display)?;
-            if use_lid {
+            let use_lid = duration.is_some() && mode == AwakeMode::LidClosed;
+            let keep_display = mode == AwakeMode::Display;
+
+            let lid_session = if use_lid {
                 match crate::lid::LidSession::start() {
-                    Ok(lid_session) => {
-                        let timer = self.schedule_timer(
-                            THERMAL_CHECK_INTERVAL,
-                            true,
-                            Self::check_thermal_state,
-                        );
-                        self.with_state_mut(|state| {
-                            state.lid = Some(lid_session);
-                            state.thermal_timer = Some(timer);
-                        });
-                    }
-                    Err(err) => {
-                        self.stop_session();
-                        self.show_error(&err);
-                        return Err(err);
+                    Ok(session) => Some(session),
+                    Err(_start_err) => {
+                        if interactive {
+                            if let Err(auth_err) = crate::lid::authorize() {
+                                self.show_error(&auth_err);
+                                return Err(auth_err);
+                            }
+                            match crate::lid::LidSession::start() {
+                                Ok(session) => Some(session),
+                                Err(retry_err) => {
+                                    self.show_error(&retry_err);
+                                    return Err(retry_err);
+                                }
+                            }
+                        } else {
+                            let err_msg = String::from(
+                                "Open Melaffeine and click Start once to set up lid-closed mode.",
+                            );
+                            self.show_error(&err_msg);
+                            return Err(err_msg);
+                        }
                     }
                 }
+            } else {
+                None
+            };
+
+            if let Err(power_err) = self.start_session(duration, keep_display) {
+                drop(lid_session);
+                self.show_error(&power_err);
+                return Err(power_err);
             }
+
+            if let Some(session) = lid_session {
+                let timer =
+                    self.schedule_timer(THERMAL_CHECK_INTERVAL, true, Self::check_thermal_state);
+                self.with_state_mut(|state| {
+                    state.lid = Some(session);
+                    state.thermal_timer = Some(timer);
+                });
+            }
+
             Ok(true)
         }
     }
@@ -425,9 +483,9 @@ impl AppDelegate {
                 IpcResponse::Ok(String::from("Stopped sleep prevention"))
             }
             // Toggle when inactive intentionally starts from the current UI control
-            // state (duration field, unit popup, checkboxes), so remote toggling
+            // state (duration field, unit popup, radios), so remote toggling
             // reflects what the user last configured in the popover.
-            IpcCommand::Toggle => match self.handle_start_stop() {
+            IpcCommand::Toggle => match self.handle_start_stop(false) {
                 Ok(true) => IpcResponse::Ok(String::from("Started sleep prevention")),
                 Ok(false) => IpcResponse::Ok(String::from("Stopped sleep prevention")),
                 Err(error) => IpcResponse::Err(error),
@@ -435,16 +493,26 @@ impl AppDelegate {
             IpcCommand::Start {
                 duration,
                 keep_display_awake,
-            } => match self.start_session(*duration, *keep_display_awake) {
-                Ok(()) => {
-                    let desc = duration.map_or_else(
-                        || String::from("Started indefinite session"),
-                        |d| format!("Started finite session ({})", format_compact_duration(d)),
-                    );
-                    IpcResponse::Ok(desc)
+            } => {
+                let target_mode = if *keep_display_awake {
+                    AwakeMode::Display
+                } else {
+                    AwakeMode::SystemOnly
+                };
+                self.with_state(|state| {
+                    state.controls.set_awake_mode(target_mode);
+                });
+                match self.start_session(*duration, *keep_display_awake) {
+                    Ok(()) => {
+                        let desc = duration.map_or_else(
+                            || String::from("Started indefinite session"),
+                            |d| format!("Started finite session ({})", format_compact_duration(d)),
+                        );
+                        IpcResponse::Ok(desc)
+                    }
+                    Err(e) => IpcResponse::Err(e),
                 }
-                Err(e) => IpcResponse::Err(e),
-            },
+            }
             IpcCommand::Quit => {
                 self.schedule_timer(0.05, false, Self::terminate_app);
                 IpcResponse::Ok(String::from("Terminating"))
@@ -496,13 +564,13 @@ impl AppDelegate {
         let updated = self.with_state(|state| {
             let active = state.power.is_active();
             let ends_at = state.power.ends_at();
-            let indefinite = if active {
+            let no_time_limit = if active {
                 ends_at.is_none()
             } else {
-                state.controls.indefinite_button.state() == NSControlStateValueOn
+                state.controls.no_time_limit_button.state() == NSControlStateValueOn
             };
             let countdown_text = self.format_countdown(ends_at);
-            let projection = compute_ui_projection(active, indefinite, countdown_text);
+            let projection = compute_ui_projection(active, no_time_limit, countdown_text);
 
             state
                 .controls
@@ -510,11 +578,15 @@ impl AppDelegate {
                 .setTitle(&NSString::from_str(projection.start_stop_title));
             state
                 .controls
-                .indefinite_button
+                .no_time_limit_button
                 .setEnabled(projection.inputs_enabled);
             state
                 .controls
-                .keep_display_awake_button
+                .mode_system_button
+                .setEnabled(projection.inputs_enabled);
+            state
+                .controls
+                .mode_display_button
                 .setEnabled(projection.inputs_enabled);
             state
                 .controls
@@ -526,9 +598,8 @@ impl AppDelegate {
                 .setEnabled(projection.duration_enabled);
             state
                 .controls
-                .lid_closed_button
-                .setEnabled(projection.duration_enabled);
-
+                .mode_lid_button
+                .setEnabled(projection.lid_enabled);
             if let Some(countdown) = &projection.countdown_text {
                 state
                     .controls
@@ -563,6 +634,13 @@ impl AppDelegate {
                     .error_label
                     .setStringValue(&NSString::from_str(""));
                 state.controls.error_label.setHidden(true);
+            }
+
+            let height = state.controls.layout_footer();
+            if (state.popover.contentSize().height - height).abs() > f64::EPSILON {
+                state
+                    .popover
+                    .setContentSize(NSSize::new(MENU_WIDTH, height));
             }
 
             if let Some(image) = NSImage::imageWithSystemSymbolName_accessibilityDescription(
@@ -602,9 +680,7 @@ impl AppDelegate {
         let ns_date = NSDate::dateWithTimeIntervalSince1970(elapsed_since_epoch.as_secs_f64());
         let time_str = formatter.stringFromDate(&ns_date).to_string();
 
-        Some(format!(
-            "{COUNTDOWN_STOPS_IN_PREFIX}{compact}{COUNTDOWN_AT_SEPARATOR}{time_str}"
-        ))
+        Some(format!("Ends at {time_str} · {compact} left"))
     }
 
     pub fn show_error(&self, message: &str) {
@@ -617,7 +693,9 @@ impl AppDelegate {
     /// Clears any displayed error message and updates UI.
     pub fn clear_error(&self) {
         self.with_state_mut(|state| {
-            state.error_message = None;
+            if state.error_message.as_deref() != Some(NOTICE_THERMAL_CUTOFF) {
+                state.error_message = None;
+            }
         });
         self.update_ui();
     }
@@ -700,6 +778,7 @@ impl AppDelegate {
         if crate::lid::thermal_too_hot() {
             self.with_state_mut(|state| {
                 Self::clear_lid_session(state);
+                state.controls.set_awake_mode(AwakeMode::SystemOnly);
                 state.error_message = Some(String::from(NOTICE_THERMAL_CUTOFF));
             });
             self.update_ui();

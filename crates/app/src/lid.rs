@@ -12,7 +12,7 @@
 //! developer signing identities, Melaffeine uses a one-time privilege
 //! escalation via the macOS administrator authorization dialog (`/usr/bin/osascript`).
 //! This installs a scoped `sudoers` drop-in file at `/etc/sudoers.d/melaffeine`.
-//! The file grants the current user passwordless `sudo` (`NOPASSWD`) for exactly
+//! The file grants the user's numeric UID passwordless `sudo` (`NOPASSWD`) for exactly
 //! two commands:
 //! - `/usr/bin/pmset -a disablesleep 1`
 //! - `/usr/bin/pmset -a disablesleep 0`
@@ -26,12 +26,15 @@
 //!
 //! Because `pmset -a disablesleep 1` is a persistent system setting that outlives
 //! processes, an active [`LidSession`] spawns a detached `/bin/sh` watchdog in
-//! its own process group. The watchdog polls `/bin/kill -0 <pid>` every 2 seconds.
-//! If Melaffeine terminates unexpectedly or crashes, the watchdog immediately runs
-//! `/usr/bin/sudo -n /usr/bin/pmset -a disablesleep 0` to restore sleep behavior.
+//! its own process group that blocks reading from an anonymous pipe held by Melaffeine.
+//! When the Melaffeine process terminates for any reason (clean exit, crash, SIGKILL,
+//! SIGTERM, or force quit), the kernel closes the write end of the pipe. The watchdog's
+//! `read` immediately encounters EOF and runs
+//! `/usr/bin/sudo -n /usr/bin/pmset -a disablesleep 0` to restore normal sleep behavior.
+//! This avoids periodic timer wakeups on battery and eliminates PID-reuse races.
 //!
-//! When [`LidSession`] drops normally, it turns off `disablesleep` and kills/reaps
-//! the watchdog process.
+//! When [`LidSession`] drops normally, it turns off `disablesleep` via `pmset` and
+//! closes the pipe write end, allowing the watchdog process to complete and exit cleanly.
 //!
 //! # Uninstallation
 //!
@@ -39,30 +42,13 @@
 //! ```sh
 //! sudo rm /etc/sudoers.d/melaffeine
 //! ```
-
 use std::os::unix::process::CommandExt;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
 
-/// True when the `sudoers` rule is installed and `sudo -n` can run the `pmset` commands without a password.
-#[must_use]
-pub fn is_authorized() -> bool {
-    let Ok(status) = Command::new("/usr/bin/sudo")
-        .args(["-n", "-l", "/usr/bin/pmset", "-a", "disablesleep", "1"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-    else {
-        return false;
-    };
-    status.success()
-}
-
-/// Shows the macOS administrator password dialog once and installs the sudoers rule. Blocks until the user answers.
 /// Err(message) is user-facing and short (e.g. user cancelled, or not an administrator).
 pub fn authorize() -> Result<(), String> {
-    let username = current_username()?;
-    let script = build_osascript_install_script(&username)?;
+    let uid = current_uid()?;
+    let script = build_osascript_install_script(uid);
 
     let output = Command::new("/usr/bin/osascript")
         .arg("-e")
@@ -73,7 +59,7 @@ pub fn authorize() -> Result<(), String> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        if stderr.contains("-128") || output.status.code() == Some(-128) {
+        if stderr.contains("-128") {
             return Err(String::from("Password prompt was cancelled."));
         }
         let trimmed = stderr.trim();
@@ -83,16 +69,13 @@ pub fn authorize() -> Result<(), String> {
         return Err(format!("Authorization failed: {trimmed}"));
     }
 
-    if is_authorized() {
-        Ok(())
-    } else {
-        Err(String::from("Authorization was not verified."))
-    }
+    set_sleep_disabled(false).map_err(|_| String::from("Authorization was not verified."))
 }
 
-/// Active lid-closed mode. While alive, `disablesleep` is 1. `Drop` sets it back to 0 and stops the watchdog.
+/// Active lid-closed mode. While alive, `disablesleep` is 1. `Drop` sets it back to 0 and releases the watchdog.
 #[derive(Debug)]
 pub struct LidSession {
+    _stdin: ChildStdin,
     watchdog: Child,
 }
 
@@ -101,20 +84,17 @@ impl LidSession {
     pub fn start() -> Result<Self, String> {
         set_sleep_disabled(true)?;
 
-        let pid = std::process::id();
-        let watchdog_script = format!(
-            "while /bin/kill -0 {pid} 2>/dev/null; do /bin/sleep 2; done; exec /usr/bin/sudo -n /usr/bin/pmset -a disablesleep 0"
-        );
-
+        // Rust standard library creates pipes with O_CLOEXEC, so subsequent child
+        // processes will not inherit this pipe's write end.
         let mut cmd = Command::new("/bin/sh");
         cmd.arg("-c")
-            .arg(&watchdog_script)
-            .stdin(Stdio::null())
+            .arg("read _ ; exec /usr/bin/sudo -n /usr/bin/pmset -a disablesleep 0")
+            .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .process_group(0);
 
-        let watchdog = match cmd.spawn() {
+        let mut child = match cmd.spawn() {
             Ok(child) => child,
             Err(spawn_err) => {
                 if let Err(reset_err) = set_sleep_disabled(false) {
@@ -126,7 +106,17 @@ impl LidSession {
             }
         };
 
-        Ok(Self { watchdog })
+        let Some(stdin) = child.stdin.take() else {
+            if let Err(reset_err) = set_sleep_disabled(false) {
+                eprintln!("Failed to reset disablesleep after watchdog stdin missing: {reset_err}");
+            }
+            return Err(String::from("Failed to capture watchdog stdin pipe"));
+        };
+
+        Ok(Self {
+            _stdin: stdin,
+            watchdog: child,
+        })
     }
 }
 
@@ -135,12 +125,14 @@ impl Drop for LidSession {
         if let Err(err) = set_sleep_disabled(false) {
             eprintln!("Failed to reset disablesleep on drop: {err}");
         }
-        let _ = self.watchdog.kill();
-        let _ = self.watchdog.wait();
+        // Dropping `self._stdin` (which happens next automatically when this struct drops)
+        // closes the pipe write end, causing the watchdog's `read _` to see EOF and run
+        // its reset as a second attempt. We do not kill the watchdog.
+        let _ = self.watchdog.try_wait();
     }
 }
 
-/// Called at app launch: if `SleepDisabled` is currently 1 (read via `pmset -g`, no root needed) and we are authorized, set it back to 0. Best-effort, silent.
+/// Called at app launch: if `SleepDisabled` is currently 1 (read via `pmset -g`, no root needed), set it back to 0. Best-effort, silent.
 pub fn reset_if_stale() {
     let Ok(output) = Command::new("/usr/bin/pmset")
         .arg("-g")
@@ -155,7 +147,7 @@ pub fn reset_if_stale() {
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    if parse_sleep_disabled(&stdout) && is_authorized() {
+    if parse_sleep_disabled(&stdout) {
         let _ = set_sleep_disabled(false);
     }
 }
@@ -187,49 +179,32 @@ fn set_sleep_disabled(disabled: bool) -> Result<(), String> {
     Ok(())
 }
 
-fn current_username() -> Result<String, String> {
+fn current_uid() -> Result<u32, String> {
     let output = Command::new("/usr/bin/id")
-        .arg("-un")
+        .arg("-u")
         .stdin(Stdio::null())
         .output()
         .map_err(|err| format!("Failed to run /usr/bin/id: {err}"))?;
 
     if !output.status.success() {
         return Err(String::from(
-            "Failed to determine current user with /usr/bin/id -un.",
+            "Failed to determine current user ID with /usr/bin/id -u.",
         ));
     }
 
-    let username_raw = String::from_utf8(output.stdout)
-        .map_err(|err| format!("Username is not valid UTF-8: {err}"))?;
-    let username = username_raw.trim();
+    let uid_raw = String::from_utf8(output.stdout)
+        .map_err(|err| format!("User ID is not valid UTF-8: {err}"))?;
+    let uid_str = uid_raw.trim();
 
-    validate_username(username)?;
-    Ok(username.to_owned())
-}
-
-fn validate_username(username: &str) -> Result<(), String> {
-    if username.is_empty() {
-        return Err(String::from("Username cannot be empty."));
-    }
-    if username.len() > 64 {
-        return Err(String::from(
-            "Username exceeds maximum length of 64 characters.",
-        ));
-    }
-    let is_valid = username
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-');
-    if !is_valid {
-        return Err(String::from("Username contains invalid characters."));
-    }
-    Ok(())
+    uid_str
+        .parse::<u32>()
+        .map_err(|err| format!("Failed to parse user ID '{uid_str}': {err}"))
 }
 
 #[must_use]
-fn sudoers_rule(username: &str) -> String {
+fn sudoers_rule(uid: u32) -> String {
     format!(
-        "{username} ALL=(root) NOPASSWD: /usr/bin/pmset -a disablesleep 1, /usr/bin/pmset -a disablesleep 0"
+        "#{uid} ALL=(root) NOPASSWD: /usr/bin/pmset -a disablesleep 1, /usr/bin/pmset -a disablesleep 0"
     )
 }
 
@@ -260,9 +235,9 @@ fn escape_for_applescript(s: &str) -> String {
     out
 }
 
-fn build_osascript_install_script(username: &str) -> Result<String, String> {
-    validate_username(username)?;
-    let rule = sudoers_rule(username);
+#[must_use]
+fn build_osascript_install_script(uid: u32) -> String {
+    let rule = sudoers_rule(uid);
     let quoted_rule = quote_sh(&rule);
 
     let sh_script = format!(
@@ -276,9 +251,9 @@ fn build_osascript_install_script(username: &str) -> Result<String, String> {
     );
 
     let applescript_sh = escape_for_applescript(&sh_script);
-    Ok(format!(
+    format!(
         "do shell script \"{applescript_sh}\" with administrator privileges with prompt \"Melaffeine needs your password once to keep your Mac awake with the lid closed.\""
-    ))
+    )
 }
 
 #[must_use]
@@ -297,55 +272,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_validate_username_accepts_valid() {
-        assert!(validate_username("annt").is_ok());
-        assert!(validate_username("john.doe").is_ok());
-        assert!(validate_username("a_b-1").is_ok());
-    }
-
-    #[test]
-    fn test_validate_username_rejects_invalid() {
-        assert!(validate_username("").is_err());
-        assert!(validate_username(" ").is_err());
-        assert!(validate_username("john doe").is_err());
-        assert!(validate_username("\"").is_err());
-        assert!(validate_username("'").is_err());
-        assert!(validate_username(";").is_err());
-        assert!(validate_username("user;evil").is_err());
-        assert!(validate_username("$").is_err());
-        assert!(validate_username("$USER").is_err());
-        assert!(validate_username("\n").is_err());
-        assert!(validate_username("user\n").is_err());
-        let long_username = "a".repeat(65);
-        assert!(validate_username(&long_username).is_err());
-    }
-
-    #[test]
     fn test_sudoers_rule_content() {
-        let rule = sudoers_rule("annt");
+        let rule = sudoers_rule(501);
         assert_eq!(
             rule,
-            "annt ALL=(root) NOPASSWD: /usr/bin/pmset -a disablesleep 1, /usr/bin/pmset -a disablesleep 0"
+            "#501 ALL=(root) NOPASSWD: /usr/bin/pmset -a disablesleep 1, /usr/bin/pmset -a disablesleep 0"
         );
     }
 
     #[test]
-    fn test_build_osascript_install_script_valid() {
-        let script = build_osascript_install_script("annt").unwrap();
+    fn test_build_osascript_install_script() {
+        let script = build_osascript_install_script(501);
         assert!(script.contains("/usr/sbin/visudo -cf"));
         assert!(script.contains("/usr/bin/install -m 0440"));
         assert!(script.contains("/etc/sudoers.d/melaffeine"));
         assert!(script.contains("with administrator privileges"));
-        assert!(script.contains("annt ALL=(root) NOPASSWD:"));
-    }
-
-    #[test]
-    fn test_build_osascript_install_script_rejects_hostile() {
-        assert!(build_osascript_install_script("annt; rm -rf /").is_err());
-        assert!(build_osascript_install_script("root\nevil").is_err());
-        assert!(build_osascript_install_script("").is_err());
-        assert!(build_osascript_install_script("$USER").is_err());
-        assert!(build_osascript_install_script("user\"name").is_err());
+        assert!(script.contains("#501 ALL=(root) NOPASSWD:"));
     }
 
     #[test]

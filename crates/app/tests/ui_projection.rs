@@ -4,11 +4,12 @@ use app::ui::{
 
 #[test]
 fn compute_ui_projection_table() {
-    let inactive = |duration_enabled| UiProjection {
+    let inactive = |finite: bool| UiProjection {
         start_stop_title: TITLE_START,
         status_icon: ICON_INACTIVE,
         inputs_enabled: true,
-        duration_enabled,
+        duration_enabled: finite,
+        lid_enabled: finite,
         countdown_text: None,
     };
     let active = |countdown_text: Option<String>| UiProjection {
@@ -16,31 +17,33 @@ fn compute_ui_projection_table() {
         status_icon: ICON_ACTIVE,
         inputs_enabled: false,
         duration_enabled: false,
+        lid_enabled: false,
         countdown_text,
     };
 
-    // (active, indefinite, countdown input) -> expected projection
+    // (active, no_time_limit, countdown input) -> expected projection
     let cases = [
         (false, false, None, inactive(true)),
         (false, false, Some("Ignored"), inactive(true)),
         (false, true, None, inactive(false)),
-        (true, false, Some("Stops in 2h at 3:00 PM"), {
+        (false, true, Some("Ignored"), inactive(false)),
+        (true, false, Some("Ends at 18:30 · 1h 59m left"), {
             let mut p = active(None);
-            p.countdown_text = Some(String::from("Stops in 2h at 3:00 PM"));
+            p.countdown_text = Some(String::from("Ends at 18:30 · 1h 59m left"));
             p
         }),
         (true, false, None, active(None)),
-        (true, true, Some("Stops in 2h at 3:00 PM"), {
+        (true, true, Some("Ends at 18:30 · 1h 59m left"), {
             let mut p = active(None);
-            p.countdown_text = Some(String::from("Stops in 2h at 3:00 PM"));
+            p.countdown_text = Some(String::from("Ends at 18:30 · 1h 59m left"));
             p
         }),
         (true, true, None, active(None)),
     ];
 
-    for (is_active, indefinite, countdown, expected) in cases {
+    for (is_active, no_time_limit, countdown, expected) in cases {
         assert_eq!(
-            compute_ui_projection(is_active, indefinite, countdown.map(str::to_string)),
+            compute_ui_projection(is_active, no_time_limit, countdown.map(str::to_string)),
             expected
         );
     }

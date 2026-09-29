@@ -9,11 +9,10 @@ User-facing behavior:
 - left-click opens controls
 - right-click shows Quit with no shortcut hint
 - Start/Stop sleep prevention
-- finite duration in minutes/hours/days or true indefinite mode
-- optional display-awake mode
-- optional lid-closed mode for finite timers
+- finite duration in minutes/hours/days or "No time limit" mode
+- three mutually exclusive awake modes: "Let the screen turn off" (default), "Keep the screen on", or "Keep running with lid closed" (finite timers only)
+- popover height dynamically computed from content layout
 - no persisted active state after quit/reboot
-
 ## Architecture & Data Flow
 Melaffeine is structured as a three-crate Cargo workspace:
 - `crates/app-core`: Pure domain logic with `#![forbid(unsafe_code)]`. Contains duration parsing (`DurationUnit`, `parse_duration`), compact minute formatting (`format_compact_duration`), and shared IPC protocol types (`IpcCommand`, `IpcResponse`).
@@ -38,7 +37,7 @@ Key patterns:
 - Unsafe code is strictly forbidden in `app-core` and isolated to narrow, documented Apple framework adapters in `app`.
 - No `Arc<Mutex<_>>`, no async runtime, no thread pools. Main run loop timers (`NSTimer`) handle finite expiry and countdown ticks. The IPC server uses a single background accept thread that dispatches each command synchronously onto the main queue (dispatch2) — no thread pool, no polling timer.
 - No persisted runtime state. Active sessions die with the process.
-- Lid-closed mode (`lid.rs`): finite-timer-only option backed by a one-time macOS administrator prompt that installs `/etc/sudoers.d/melaffeine` for passwordless `pmset -a disablesleep {1|0}`, a `LidSession` RAII guard + crash watchdog child process, and a 30-second thermal guard that turns lid-closed mode off if `NSProcessInfo.thermalState` reaches Serious or Critical.
+- Lid-closed mode (`lid.rs`): finite-timer-only option backed by a one-time macOS administrator prompt that installs `/etc/sudoers.d/melaffeine` for passwordless `pmset -a disablesleep {1|0}`, a `LidSession` RAII guard + crash watchdog child process that resets sleep instantly on process termination via pipe EOF (`read _`), and a 30-second thermal guard that turns lid-closed mode off and resets UI mode to SystemOnly if `NSProcessInfo.thermalState` reaches Serious or Critical.
 
 ## Key Directories
 
@@ -142,15 +141,19 @@ Functional QA checklist:
 - no Dock icon appears
 - outline cup (`cup.and.saucer`) when off, filled cup (`cup.and.saucer.fill`) when on
 - left-click opens the popover anchored under the icon
+- popover fits its content: no empty space below Start when idle; the countdown/messages grow it and wrap
 - click away closes popover
 - right-click shows Quit with no shortcut hint
 - Start creates assertion and button becomes Stop
 - Stop releases assertion and button becomes Start
 - finite duration auto-stops and UI/icon sync back to off
-- finite active session shows remaining time and stop clock time in the popover
+- finite active session shows countdown text ("Ends at <time> · <compact> left") in the popover
 - finite duration accepts minutes/hours/days, rejects zero, negative, non-numeric, decimal, and excessive values (>365 days)
 - `pmset -g assertions` confirms `PreventUserIdleSystemSleep` / `PreventUserIdleDisplaySleep`
-- "Keep running with lid closed" checkbox is disabled when "Run indefinitely" is checked
-- first use of lid-closed mode shows the macOS administrator password prompt once
+- the three awake modes ("Let the screen turn off", "Keep the screen on", "Keep running with lid closed") are exclusive
+- "Keep running with lid closed" radio is disabled when "No time limit" is checked (and checking No time limit resets mode to "Let the screen turn off")
+- first use of lid-closed mode from the popover Start button shows the macOS administrator password prompt once
+- CLI never triggers the password prompt (non-interactive lid start returns an error directing user to open popover)
+- a second launch exits immediately and leaves the first instance untouched (probes IPC status before modifying system state or creating UI)
 - `pmset -g | grep SleepDisabled` shows `1` while active and `0` after Stop, expiry, and Quit
-- after `kill -9` of the app, `SleepDisabled` returns to `0` within a few seconds
+- after `kill -9` of the app, `SleepDisabled` returns to `0` instantly via watchdog pipe EOF (`read _`)

@@ -14,9 +14,9 @@ use std::time::{Duration, Instant, SystemTime};
 
 use app::app_delegate::AppDelegate;
 use app::ui::{
-    DEFAULT_DURATION_TEXT, ERROR_DURATION_INVALID, TITLE_KEEP_DISPLAY_AWAKE,
-    TITLE_KEEP_RUNNING_LID_CLOSED, TITLE_RUN_INDEFINITELY, TITLE_START, TITLE_STOP,
-    UNIT_DAYS_INDEX, UNIT_HOURS_INDEX, UNIT_MINUTES_INDEX, build_content_view,
+    AwakeMode, DEFAULT_DURATION_TEXT, ERROR_DURATION_INVALID, TITLE_MODE_DISPLAY, TITLE_MODE_LID,
+    TITLE_MODE_SYSTEM, TITLE_NO_TIME_LIMIT, TITLE_START, TITLE_STOP, UNIT_DAYS_INDEX,
+    UNIT_HOURS_INDEX, UNIT_MINUTES_INDEX, build_content_view,
 };
 use app_core::ipc::{IpcCommand, IpcResponse, SessionStatus};
 use objc2::runtime::ProtocolObject;
@@ -44,19 +44,43 @@ fn main() {
     // 1. Test build_content_view
     let controls = build_content_view(mtm);
     assert_eq!(
-        controls.indefinite_button.title().to_string(),
-        TITLE_RUN_INDEFINITELY
+        controls.no_time_limit_button.title().to_string(),
+        TITLE_NO_TIME_LIMIT
     );
     assert_eq!(controls.start_stop_button.title().to_string(), TITLE_START);
     assert_eq!(
-        controls.keep_display_awake_button.title().to_string(),
-        TITLE_KEEP_DISPLAY_AWAKE
+        controls.mode_system_button.title().to_string(),
+        TITLE_MODE_SYSTEM
     );
     assert_eq!(
-        controls.lid_closed_button.title().to_string(),
-        TITLE_KEEP_RUNNING_LID_CLOSED
+        controls.mode_display_button.title().to_string(),
+        TITLE_MODE_DISPLAY
     );
-    assert_eq!(controls.lid_closed_button.state(), NSControlStateValueOff);
+    assert_eq!(controls.mode_lid_button.title().to_string(), TITLE_MODE_LID);
+    assert_eq!(controls.mode_system_button.state(), NSControlStateValueOn);
+    assert_eq!(controls.mode_display_button.state(), NSControlStateValueOff);
+    assert_eq!(controls.mode_lid_button.state(), NSControlStateValueOff);
+    assert_eq!(controls.awake_mode(), AwakeMode::SystemOnly);
+
+    // Test exclusive radio selection updates
+    controls.set_awake_mode(AwakeMode::Display);
+    assert_eq!(controls.mode_system_button.state(), NSControlStateValueOff);
+    assert_eq!(controls.mode_display_button.state(), NSControlStateValueOn);
+    assert_eq!(controls.mode_lid_button.state(), NSControlStateValueOff);
+    assert_eq!(controls.awake_mode(), AwakeMode::Display);
+
+    controls.set_awake_mode(AwakeMode::LidClosed);
+    assert_eq!(controls.mode_system_button.state(), NSControlStateValueOff);
+    assert_eq!(controls.mode_display_button.state(), NSControlStateValueOff);
+    assert_eq!(controls.mode_lid_button.state(), NSControlStateValueOn);
+    assert_eq!(controls.awake_mode(), AwakeMode::LidClosed);
+
+    controls.set_awake_mode(AwakeMode::SystemOnly);
+    assert_eq!(controls.mode_system_button.state(), NSControlStateValueOn);
+    assert_eq!(controls.mode_display_button.state(), NSControlStateValueOff);
+    assert_eq!(controls.mode_lid_button.state(), NSControlStateValueOff);
+    assert_eq!(controls.awake_mode(), AwakeMode::SystemOnly);
+
     assert_eq!(
         controls.duration_field.stringValue().to_string(),
         DEFAULT_DURATION_TEXT
@@ -82,9 +106,10 @@ fn main() {
     let state_opt = delegate.ivars().borrow();
     let state = state_opt.as_ref().expect("AppState must be initialized");
     let duration_field = state.controls.duration_field.clone();
-    let indefinite_button = state.controls.indefinite_button.clone();
-    let display_awake_button = state.controls.keep_display_awake_button.clone();
-    let lid_closed_button = state.controls.lid_closed_button.clone();
+    let no_time_limit_button = state.controls.no_time_limit_button.clone();
+    let mode_system_button = state.controls.mode_system_button.clone();
+    let mode_display_button = state.controls.mode_display_button.clone();
+    let mode_lid_button = state.controls.mode_lid_button.clone();
     let unit_popup = state.controls.unit_popup.clone();
     let start_stop_button = state.controls.start_stop_button.clone();
     let status_item = state.status_item.clone();
@@ -92,23 +117,119 @@ fn main() {
     let error_label = state.controls.error_label.clone();
     drop(state_opt);
 
-    // NEVER tick `lid_closed_button` before a Start in tests: that would trigger
-    // the macOS administrator password prompt / sudo.
+    assert_eq!(mode_system_button.title().to_string(), TITLE_MODE_SYSTEM);
+    assert_eq!(mode_system_button.state(), NSControlStateValueOn);
+    assert!(mode_system_button.isEnabled());
+    assert_eq!(mode_display_button.title().to_string(), TITLE_MODE_DISPLAY);
+    assert_eq!(mode_display_button.state(), NSControlStateValueOff);
+    assert!(mode_display_button.isEnabled());
+    assert_eq!(mode_lid_button.title().to_string(), TITLE_MODE_LID);
+    assert_eq!(mode_lid_button.state(), NSControlStateValueOff);
+    assert!(mode_lid_button.isEnabled());
+    // Ticking No time limit while LidClosed is selected switches to SystemOnly and disables lid radio
+    delegate
+        .ivars()
+        .borrow()
+        .as_ref()
+        .unwrap()
+        .controls
+        .set_awake_mode(AwakeMode::LidClosed);
+    assert_eq!(mode_lid_button.state(), NSControlStateValueOn);
     assert_eq!(
-        lid_closed_button.title().to_string(),
-        TITLE_KEEP_RUNNING_LID_CLOSED
+        delegate
+            .ivars()
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .controls
+            .awake_mode(),
+        AwakeMode::LidClosed
     );
-    assert_eq!(lid_closed_button.state(), NSControlStateValueOff);
-    assert!(lid_closed_button.isEnabled());
 
+    no_time_limit_button.setState(NSControlStateValueOn);
+    unsafe {
+        let _: () = msg_send![&*delegate, noTimeLimitChanged: &*no_time_limit_button];
+    }
+    assert_eq!(mode_system_button.state(), NSControlStateValueOn);
+    assert_eq!(mode_lid_button.state(), NSControlStateValueOff);
+    assert!(!mode_lid_button.isEnabled());
+    assert_eq!(
+        delegate
+            .ivars()
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .controls
+            .awake_mode(),
+        AwakeMode::SystemOnly
+    );
+
+    // Untick No time limit
+    no_time_limit_button.setState(NSControlStateValueOff);
+    unsafe {
+        let _: () = msg_send![&*delegate, noTimeLimitChanged: &*no_time_limit_button];
+    }
+    assert!(mode_lid_button.isEnabled());
+
+    // Non-interactive IPC Toggle with LidClosed selected must never show an admin authorization prompt.
+    // If the machine already has passwordless sudo configured for pmset, LidSession::start()
+    // will succeed without prompting. Otherwise, it fails and returns an Err containing "set up".
+    // Either outcome is acceptable; neither prompts. We immediately stop the session if started.
+    // NEVER drive the Start BUTTON with LidClosed selected (it could open the admin prompt).
+    delegate
+        .ivars()
+        .borrow()
+        .as_ref()
+        .unwrap()
+        .controls
+        .set_awake_mode(AwakeMode::LidClosed);
+    let toggle_lid_resp = delegate.execute_ipc_command(&IpcCommand::Toggle);
+    assert!(
+        !matches!(toggle_lid_resp, IpcResponse::Status(_)),
+        "Unexpected status response to Toggle"
+    );
+    if let IpcResponse::Err(err) = &toggle_lid_resp {
+        assert!(
+            err.contains("set up"),
+            "Expected error message instructing user to set up lid mode, got: {err}"
+        );
+    } else if matches!(toggle_lid_resp, IpcResponse::Ok(_)) {
+        // Sudoers rule was already installed on this machine; ensure we clean up immediately.
+        delegate.stop_session();
+    }
+    delegate
+        .ivars()
+        .borrow()
+        .as_ref()
+        .unwrap()
+        .controls
+        .set_awake_mode(AwakeMode::SystemOnly);
+    delegate.update_ui();
     // Validation error display and persistence across update_ui
+    let idle_height = delegate
+        .ivars()
+        .borrow()
+        .as_ref()
+        .unwrap()
+        .controls
+        .layout_footer();
     delegate.show_error("Test Error Message");
     assert_eq!(error_label.stringValue().to_string(), "Test Error Message");
     assert!(!error_label.isHidden());
+    let error_height = delegate
+        .ivars()
+        .borrow()
+        .as_ref()
+        .unwrap()
+        .controls
+        .layout_footer();
+    assert!(
+        idle_height < error_height,
+        "Expected idle content height ({idle_height}) to be less than height with error shown ({error_height})"
+    );
     delegate.update_ui();
     assert_eq!(error_label.stringValue().to_string(), "Test Error Message");
     assert!(!error_label.isHidden());
-
     // Action handler: controlChanged clears error
     unsafe {
         let _: () = msg_send![&*delegate, controlChanged: &*duration_field];
@@ -119,16 +240,20 @@ fn main() {
     // Finite session start / stop (minutes)
     duration_field.setStringValue(&NSString::from_str("15"));
     unit_popup.selectItemAtIndex(UNIT_MINUTES_INDEX);
-    assert_eq!(delegate.handle_start_stop(), Ok(true));
+    assert_eq!(delegate.handle_start_stop(true), Ok(true));
     assert_eq!(error_label.stringValue().to_string(), "");
     assert!(error_label.isHidden());
     assert!(!time_label.isHidden());
     assert_eq!(start_stop_button.title().to_string(), TITLE_STOP);
-    assert!(!lid_closed_button.isEnabled());
+    assert!(!mode_lid_button.isEnabled());
 
     let future_end = SystemTime::now() + Duration::from_secs(900);
     let countdown_res = delegate.format_countdown(Some(future_end));
     assert!(countdown_res.is_some());
+    let countdown_str = countdown_res.unwrap();
+    assert!(countdown_str.starts_with("Ends at "));
+    assert!(countdown_str.contains(" · "));
+    assert!(countdown_str.ends_with(" left"));
     let past_end = SystemTime::now()
         .checked_sub(Duration::from_secs(10))
         .unwrap();
@@ -136,28 +261,34 @@ fn main() {
     assert!(delegate.format_countdown(None).is_none());
 
     // Stop session
-    assert_eq!(delegate.handle_start_stop(), Ok(false));
+    assert_eq!(delegate.handle_start_stop(true), Ok(false));
     assert_eq!(start_stop_button.title().to_string(), TITLE_START);
-    assert!(lid_closed_button.isEnabled());
+    assert!(mode_lid_button.isEnabled());
 
     // Indefinite session start / stop with display awake
-    indefinite_button.setState(NSControlStateValueOn);
+    no_time_limit_button.setState(NSControlStateValueOn);
     delegate.update_ui();
-    assert!(!lid_closed_button.isEnabled());
-    display_awake_button.setState(NSControlStateValueOn);
-    assert_eq!(delegate.handle_start_stop(), Ok(true));
+    assert!(!mode_lid_button.isEnabled());
+    delegate
+        .ivars()
+        .borrow()
+        .as_ref()
+        .unwrap()
+        .controls
+        .set_awake_mode(AwakeMode::Display);
+    assert_eq!(delegate.handle_start_stop(true), Ok(true));
     assert_eq!(start_stop_button.title().to_string(), TITLE_STOP);
-    assert!(!lid_closed_button.isEnabled());
-    assert_eq!(delegate.handle_start_stop(), Ok(false));
+    assert!(!mode_lid_button.isEnabled());
+    assert_eq!(delegate.handle_start_stop(true), Ok(false));
     assert_eq!(start_stop_button.title().to_string(), TITLE_START);
 
     // Invalid input error path
-    indefinite_button.setState(NSControlStateValueOff);
+    no_time_limit_button.setState(NSControlStateValueOff);
     delegate.update_ui();
-    assert!(lid_closed_button.isEnabled());
+    assert!(mode_lid_button.isEnabled());
     duration_field.setStringValue(&NSString::from_str("invalid_number"));
     assert_eq!(
-        delegate.handle_start_stop(),
+        delegate.handle_start_stop(true),
         Err(String::from(ERROR_DURATION_INVALID))
     );
     delegate.show_error(ERROR_DURATION_INVALID);
@@ -170,14 +301,14 @@ fn main() {
     // Hours and Days units
     duration_field.setStringValue(&NSString::from_str("3"));
     unit_popup.selectItemAtIndex(UNIT_HOURS_INDEX);
-    assert_eq!(delegate.handle_start_stop(), Ok(true));
+    assert_eq!(delegate.handle_start_stop(true), Ok(true));
     assert_eq!(error_label.stringValue().to_string(), "");
     assert!(error_label.isHidden());
     delegate.stop_session();
 
     duration_field.setStringValue(&NSString::from_str("2"));
     unit_popup.selectItemAtIndex(UNIT_DAYS_INDEX);
-    assert_eq!(delegate.handle_start_stop(), Ok(true));
+    assert_eq!(delegate.handle_start_stop(true), Ok(true));
     delegate.stop_session();
 
     // Popover toggle
@@ -186,7 +317,7 @@ fn main() {
 
         duration_field.setStringValue(&NSString::from_str("10"));
         unit_popup.selectItemAtIndex(UNIT_MINUTES_INDEX);
-        assert_eq!(delegate.handle_start_stop(), Ok(true));
+        assert_eq!(delegate.handle_start_stop(true), Ok(true));
         assert_eq!(start_stop_button.title().to_string(), TITLE_STOP);
 
         delegate.toggle_popover_relative_to(&button);
@@ -202,7 +333,7 @@ fn main() {
     assert_eq!(status_resp, IpcResponse::Status(None));
 
     // Toggle when inactive with invalid input must report the validation error.
-    indefinite_button.setState(NSControlStateValueOff);
+    no_time_limit_button.setState(NSControlStateValueOff);
     duration_field.setStringValue(&NSString::from_str("invalid_number"));
     let invalid_toggle = delegate.execute_ipc_command(&IpcCommand::Toggle);
     assert_eq!(
@@ -213,7 +344,7 @@ fn main() {
     assert_eq!(invalid_status, IpcResponse::Status(None));
 
     // A finite IPC start remains finite even when the editable checkbox is checked.
-    indefinite_button.setState(NSControlStateValueOn);
+    no_time_limit_button.setState(NSControlStateValueOn);
     delegate.show_error("stale successful start error");
     let start_resp = delegate.execute_ipc_command(&IpcCommand::Start {
         duration: Some(Duration::from_secs(120)),
@@ -334,6 +465,93 @@ fn main() {
         let _: () = msg_send![&*delegate, applicationWillTerminate: &*notif];
     }
     println!("All main thread integration tests PASSED!");
+
+    if let Ok(render_prefix) = std::env::var("MELAFFEINE_RENDER_POPOVER") {
+        use objc2_app_kit::{
+            NSAppearance, NSAppearanceCustomization, NSAppearanceNameAqua, NSBackingStoreType,
+            NSWindow, NSWindowStyleMask,
+        };
+        use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+
+        let initial_h = delegate
+            .ivars()
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .controls
+            .layout_footer();
+        let win_frame = CGRect::new(
+            CGPoint::new(0.0, 0.0),
+            CGSize::new(app::ui::MENU_WIDTH, initial_h),
+        );
+        let window = unsafe {
+            NSWindow::initWithContentRect_styleMask_backing_defer(
+                mtm.alloc(),
+                win_frame,
+                NSWindowStyleMask::Borderless,
+                NSBackingStoreType::Buffered,
+                false,
+            )
+        };
+        if let Some(aqua) = unsafe { NSAppearance::appearanceNamed(NSAppearanceNameAqua) } {
+            window.setAppearance(Some(&aqua));
+        }
+
+        let render_view = |path: &str| {
+            let state = delegate.ivars().borrow();
+            let controls = &state.as_ref().unwrap().controls;
+            let total_h = controls.layout_footer();
+            let view = &controls.view;
+            window.setContentSize(CGSize::new(app::ui::MENU_WIDTH, total_h));
+            window.setContentView(Some(view));
+            view.layoutSubtreeIfNeeded();
+            view.displayIfNeeded();
+
+            let bounds = view.bounds();
+            let rep = view
+                .bitmapImageRepForCachingDisplayInRect(bounds)
+                .expect("bitmap rep");
+            view.cacheDisplayInRect_toBitmapImageRep(bounds, &rep);
+            let dict = objc2_foundation::NSDictionary::new();
+            let data = unsafe {
+                rep.representationUsingType_properties(
+                    objc2_app_kit::NSBitmapImageFileType::PNG,
+                    &dict,
+                )
+            }
+            .expect("png data");
+            let bytes = unsafe { data.as_bytes_unchecked() };
+            std::fs::write(path, bytes).expect("write png");
+            println!("Rendered popover view to {path} (height={total_h})");
+        };
+        // Render idle state
+        delegate.stop_session();
+        let state = delegate.ivars().borrow();
+        let controls = &state.as_ref().unwrap().controls;
+        controls
+            .no_time_limit_button
+            .setState(NSControlStateValueOff);
+        controls.set_awake_mode(AwakeMode::SystemOnly);
+        drop(state);
+        delegate.update_ui();
+        render_view(&format!("{render_prefix}-idle.png"));
+
+        // Render active state with countdown visible (started via IPC Start with 2h)
+        let start_resp = delegate.execute_ipc_command(&IpcCommand::Start {
+            duration: Some(Duration::from_secs(7200)),
+            keep_display_awake: false,
+        });
+        assert!(matches!(start_resp, IpcResponse::Ok(_)));
+        delegate.update_ui();
+        render_view(&format!("{render_prefix}-active.png"));
+        delegate.stop_session();
+
+        // Render error state while idle
+        delegate.show_error("Open Melaffeine and click Start once to set up lid-closed mode.");
+        delegate.update_ui();
+        render_view(&format!("{render_prefix}-error.png"));
+        delegate.clear_error();
+    }
 
     // Quit IPC command is tested last so the 0.05s termination timer does not
     // fire during NSRunLoop processing in earlier tests.
