@@ -33,14 +33,13 @@ nix develop
 ## Build & Test
 
 ```sh
-just build                       # build release binary and package local Melaffeine.app
-just test                        # run test suite with cargo-nextest
-cargo nextest run --workspace    # run workspace tests directly
-nix flake check                  # run Nix flake checks (clippy, tests, formatting)
-nix build                        # build macOS app bundle via Nix & Crane
-just cli status                    # query running status via CLI
-just cli start 2h                  # start a 2-hour sleep prevention session via CLI
-just cli stop                      # stop active session via CLI
+just build           # build release binary and package local Melaffeine.app
+just run             # build debug app bundle and launch Melaffeine
+just test            # run test suite with cargo-nextest
+just check           # run formatting check, cargo check, nextest, and clippy
+just cli status      # query running status via CLI
+just cli start 2h    # start a 2-hour sleep prevention session via CLI
+just cli stop        # stop active session via CLI
 ```
 
 ## Stack

@@ -26,11 +26,5 @@ jobs:
       - name: Nix Flake Checks
         run: nix flake check
 
-      - name: Workspace Cargo & Formatting Checks
-        run: nix develop --command just check
-
-      - name: Build Default Package (Melaffeine.app)
-        run: nix build .#default
-
       - name: Build CLI Package (melaffeine)
         run: nix build .#cli
