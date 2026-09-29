@@ -19,6 +19,9 @@ use objc2::MainThreadMarker;
 /// Timeout for each individual IPC read and write operation.
 const IPC_IO_TIMEOUT: Duration = Duration::from_secs(1);
 
+/// Backoff delay after a non-transient `accept()` failure (e.g. `EMFILE`/`ENFILE`).
+const IPC_ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(200);
+
 type Handler = Box<dyn Fn(&IpcCommand) -> IpcResponse>;
 
 fn remove_socket_if_owned(path: &Path, identity: (u64, u64)) {
@@ -100,23 +103,35 @@ impl IpcServer {
 
         let worker_stopping = Arc::clone(&stopping);
         drop(thread::spawn(move || {
+            let mut last_error_kind = None;
             loop {
-                let stream = match listener.accept() {
-                    Ok((stream, _)) => stream,
+                if worker_stopping.load(Ordering::Acquire) {
+                    break;
+                }
+                let accept_result = listener.accept();
+                if worker_stopping.load(Ordering::Acquire) {
+                    break;
+                }
+                match accept_result {
+                    Ok((stream, _)) => {
+                        last_error_kind = None;
+                        serve_connection(stream, |command| {
+                            bound_handler.get_on_main(|h| h(command))
+                        });
+                    }
                     Err(error)
                         if matches!(
                             error.kind(),
                             ErrorKind::Interrupted | ErrorKind::ConnectionAborted
-                        ) && !worker_stopping.load(Ordering::Acquire) =>
-                    {
-                        continue;
+                        ) => {}
+                    Err(error) => {
+                        if last_error_kind != Some(error.kind()) {
+                            eprintln!("Melaffeine: IPC accept error: {error}");
+                            last_error_kind = Some(error.kind());
+                        }
+                        thread::sleep(IPC_ACCEPT_ERROR_BACKOFF);
                     }
-                    Err(_) => break,
-                };
-                if worker_stopping.load(Ordering::Acquire) {
-                    break;
                 }
-                serve_connection(stream, |command| bound_handler.get_on_main(|h| h(command)));
             }
         }));
 
