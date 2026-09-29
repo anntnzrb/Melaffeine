@@ -15,8 +15,8 @@ use std::time::{Duration, Instant, SystemTime};
 use app::app_delegate::AppDelegate;
 use app::ui::{
     DEFAULT_DURATION_TEXT, ERROR_DURATION_INVALID, TITLE_KEEP_DISPLAY_AWAKE,
-    TITLE_RUN_INDEFINITELY, TITLE_START, TITLE_STOP, UNIT_DAYS_INDEX, UNIT_HOURS_INDEX,
-    UNIT_MINUTES_INDEX, build_content_view,
+    TITLE_KEEP_RUNNING_LID_CLOSED, TITLE_RUN_INDEFINITELY, TITLE_START, TITLE_STOP,
+    UNIT_DAYS_INDEX, UNIT_HOURS_INDEX, UNIT_MINUTES_INDEX, build_content_view,
 };
 use app_core::ipc::{IpcCommand, IpcResponse, SessionStatus};
 use objc2::runtime::ProtocolObject;
@@ -53,6 +53,11 @@ fn main() {
         TITLE_KEEP_DISPLAY_AWAKE
     );
     assert_eq!(
+        controls.lid_closed_button.title().to_string(),
+        TITLE_KEEP_RUNNING_LID_CLOSED
+    );
+    assert_eq!(controls.lid_closed_button.state(), NSControlStateValueOff);
+    assert_eq!(
         controls.duration_field.stringValue().to_string(),
         DEFAULT_DURATION_TEXT
     );
@@ -79,12 +84,22 @@ fn main() {
     let duration_field = state.controls.duration_field.clone();
     let indefinite_button = state.controls.indefinite_button.clone();
     let display_awake_button = state.controls.keep_display_awake_button.clone();
+    let lid_closed_button = state.controls.lid_closed_button.clone();
     let unit_popup = state.controls.unit_popup.clone();
     let start_stop_button = state.controls.start_stop_button.clone();
     let status_item = state.status_item.clone();
     let time_label = state.controls.time_label.clone();
     let error_label = state.controls.error_label.clone();
     drop(state_opt);
+
+    // NEVER tick `lid_closed_button` before a Start in tests: that would trigger
+    // the macOS administrator password prompt / sudo.
+    assert_eq!(
+        lid_closed_button.title().to_string(),
+        TITLE_KEEP_RUNNING_LID_CLOSED
+    );
+    assert_eq!(lid_closed_button.state(), NSControlStateValueOff);
+    assert!(lid_closed_button.isEnabled());
 
     // Validation error display and persistence across update_ui
     delegate.show_error("Test Error Message");
@@ -109,6 +124,7 @@ fn main() {
     assert!(error_label.isHidden());
     assert!(!time_label.isHidden());
     assert_eq!(start_stop_button.title().to_string(), TITLE_STOP);
+    assert!(!lid_closed_button.isEnabled());
 
     let future_end = SystemTime::now() + Duration::from_secs(900);
     let countdown_res = delegate.format_countdown(Some(future_end));
@@ -122,17 +138,23 @@ fn main() {
     // Stop session
     assert_eq!(delegate.handle_start_stop(), Ok(false));
     assert_eq!(start_stop_button.title().to_string(), TITLE_START);
+    assert!(lid_closed_button.isEnabled());
 
     // Indefinite session start / stop with display awake
     indefinite_button.setState(NSControlStateValueOn);
+    delegate.update_ui();
+    assert!(!lid_closed_button.isEnabled());
     display_awake_button.setState(NSControlStateValueOn);
     assert_eq!(delegate.handle_start_stop(), Ok(true));
     assert_eq!(start_stop_button.title().to_string(), TITLE_STOP);
+    assert!(!lid_closed_button.isEnabled());
     assert_eq!(delegate.handle_start_stop(), Ok(false));
     assert_eq!(start_stop_button.title().to_string(), TITLE_START);
 
     // Invalid input error path
     indefinite_button.setState(NSControlStateValueOff);
+    delegate.update_ui();
+    assert!(lid_closed_button.isEnabled());
     duration_field.setStringValue(&NSString::from_str("invalid_number"));
     assert_eq!(
         delegate.handle_start_stop(),

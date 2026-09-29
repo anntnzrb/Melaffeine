@@ -11,6 +11,7 @@ User-facing behavior:
 - Start/Stop sleep prevention
 - finite duration in minutes/hours/days or true indefinite mode
 - optional display-awake mode
+- optional lid-closed mode for finite timers
 - no persisted active state after quit/reboot
 
 ## Architecture & Data Flow
@@ -37,6 +38,7 @@ Key patterns:
 - Unsafe code is strictly forbidden in `app-core` and isolated to narrow, documented Apple framework adapters in `app`.
 - No `Arc<Mutex<_>>`, no async runtime, no thread pools. Main run loop timers (`NSTimer`) handle finite expiry and countdown ticks. The IPC server uses a single background accept thread that dispatches each command synchronously onto the main queue (dispatch2) — no thread pool, no polling timer.
 - No persisted runtime state. Active sessions die with the process.
+- Lid-closed mode (`lid.rs`): finite-timer-only option backed by a one-time macOS administrator prompt that installs `/etc/sudoers.d/melaffeine` for passwordless `pmset -a disablesleep {1|0}`, a `LidSession` RAII guard + crash watchdog child process, and a 30-second thermal guard that turns lid-closed mode off if `NSProcessInfo.thermalState` reaches Serious or Critical.
 
 ## Key Directories
 
@@ -103,6 +105,7 @@ crates/app/src/power.rs                  PowerController & assertion session mod
 crates/app/src/ipc_server.rs             Unix domain socket IPC listener and dispatcher
 crates/app/src/conflicts.rs              Conflicting assertion detection
 crates/app/src/iokit.rs                  IOKit assertion provider adapter
+crates/app/src/lid.rs                    Lid-closed mode, sudoers setup, and watchdog
 crates/cli/src/main.rs                   CLI controller entry point
 Resources/Info.plist                     Bundle Info.plist definition
 justfile                                 Primary command runner (POSIX /bin/sh)
@@ -147,3 +150,7 @@ Functional QA checklist:
 - finite active session shows remaining time and stop clock time in the popover
 - finite duration accepts minutes/hours/days, rejects zero, negative, non-numeric, decimal, and excessive values (>365 days)
 - `pmset -g assertions` confirms `PreventUserIdleSystemSleep` / `PreventUserIdleDisplaySleep`
+- "Keep running with lid closed" checkbox is disabled when "Run indefinitely" is checked
+- first use of lid-closed mode shows the macOS administrator password prompt once
+- `pmset -g | grep SleepDisabled` shows `1` while active and `0` after Stop, expiry, and Quit
+- after `kill -9` of the app, `SleepDisabled` returns to `0` within a few seconds

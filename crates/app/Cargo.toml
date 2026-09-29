@@ -20,6 +20,7 @@ objc2-foundation = { workspace = true, features = [
     "NSArray",
     "NSDate",
     "NSDateFormatter",
+    "NSProcessInfo",
     "NSRunLoop",
     "NSString",
     "NSTimer",

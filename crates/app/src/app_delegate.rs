@@ -9,8 +9,9 @@ use crate::ipc_server::IpcServer;
 use crate::power::PowerController;
 use crate::ui::{
     COUNTDOWN_AT_SEPARATOR, COUNTDOWN_STOPS_IN_PREFIX, COUNTDOWN_TIMER_TOLERANCE,
-    COUNTDOWN_UPDATE_INTERVAL, ERROR_DURATION_INVALID, MENU_HEIGHT, MENU_WIDTH, PopoverControls,
-    TITLE_QUIT, UNIT_DAYS_INDEX, UNIT_MINUTES_INDEX, build_content_view, compute_ui_projection,
+    COUNTDOWN_UPDATE_INTERVAL, ERROR_DURATION_INVALID, MENU_HEIGHT, MENU_WIDTH,
+    NOTICE_THERMAL_CUTOFF, PopoverControls, THERMAL_CHECK_INTERVAL, TITLE_QUIT, UNIT_DAYS_INDEX,
+    UNIT_MINUTES_INDEX, build_content_view, compute_ui_projection,
 };
 use app_core::duration::{DurationUnit, format_compact_duration, parse_duration};
 use app_core::ipc::{IpcCommand, IpcResponse, SessionStatus, socket_path};
@@ -38,6 +39,10 @@ pub struct AppState {
     pub controls: PopoverControls,
     /// Active power management controller.
     pub power: PowerController<IOKitProvider>,
+    /// Active lid-closed mode session, if enabled for the current finite run.
+    pub lid: Option<crate::lid::LidSession>,
+    /// Repeating timer checking thermal state while lid-closed mode is active.
+    pub thermal_timer: Option<Retained<NSTimer>>,
     /// Retained global event monitor token for clicks outside the popover.
     pub outside_click_monitor: Option<Retained<AnyObject>>,
     /// Repeating timer for updating countdown text while popover is open.
@@ -153,6 +158,10 @@ impl AppDelegate {
             controls
                 .indefinite_button
                 .setAction(Some(sel!(controlChanged:)));
+            controls.lid_closed_button.setTarget(Some(self));
+            controls
+                .lid_closed_button
+                .setAction(Some(sel!(controlChanged:)));
 
             controls.start_stop_button.setTarget(Some(self));
             controls
@@ -168,6 +177,8 @@ impl AppDelegate {
             popover,
             controls,
             power: PowerController::new(IOKitProvider),
+            lid: None,
+            thermal_timer: None,
             outside_click_monitor: None,
             ipc_server: None,
             countdown_timer: None,
@@ -177,6 +188,7 @@ impl AppDelegate {
         };
 
         *self.ivars().borrow_mut() = Some(app_state);
+        crate::lid::reset_if_stale();
         let weak_self: Weak<Self> = Weak::from_retained(&Retained::from(self));
         let server = IpcServer::start(mtm, &socket_path(), move |cmd| {
             weak_self.load().map_or_else(
@@ -291,37 +303,70 @@ impl AppDelegate {
     ///
     /// Returns `Ok(true)` if sleep prevention was started, `Ok(false)` if stopped.
     pub fn handle_start_stop(&self) -> Result<bool, String> {
-        let (is_active, duration, keep_display) = self
-            .with_state(|state| -> Result<(bool, Option<Duration>, bool), String> {
-                let is_active = state.power.is_active();
-                if is_active {
-                    return Ok((true, None, false));
-                }
+        let (is_active, duration, keep_display, lid_closed) = self
+            .with_state(
+                |state| -> Result<(bool, Option<Duration>, bool, bool), String> {
+                    let is_active = state.power.is_active();
+                    if is_active {
+                        return Ok((true, None, false, false));
+                    }
 
-                let indefinite = state.controls.indefinite_button.state() == NSControlStateValueOn;
-                let keep_display =
-                    state.controls.keep_display_awake_button.state() == NSControlStateValueOn;
+                    let indefinite =
+                        state.controls.indefinite_button.state() == NSControlStateValueOn;
+                    let keep_display =
+                        state.controls.keep_display_awake_button.state() == NSControlStateValueOn;
+                    let lid_closed = !indefinite
+                        && state.controls.lid_closed_button.state() == NSControlStateValueOn;
 
-                if indefinite {
-                    Ok((false, None, keep_display))
-                } else {
-                    let input = state.controls.duration_field.stringValue().to_string();
-                    let unit = match state.controls.unit_popup.indexOfSelectedItem() {
-                        UNIT_MINUTES_INDEX => DurationUnit::Minutes,
-                        UNIT_DAYS_INDEX => DurationUnit::Days,
-                        _ => DurationUnit::Hours,
-                    };
-                    let duration = parse_duration(input.trim(), unit)
-                        .ok_or_else(|| String::from(ERROR_DURATION_INVALID))?;
-                    Ok((false, Some(duration), keep_display))
-                }
-            })
+                    if indefinite {
+                        Ok((false, None, keep_display, false))
+                    } else {
+                        let input = state.controls.duration_field.stringValue().to_string();
+                        let unit = match state.controls.unit_popup.indexOfSelectedItem() {
+                            UNIT_MINUTES_INDEX => DurationUnit::Minutes,
+                            UNIT_DAYS_INDEX => DurationUnit::Days,
+                            _ => DurationUnit::Hours,
+                        };
+                        let duration = parse_duration(input.trim(), unit)
+                            .ok_or_else(|| String::from(ERROR_DURATION_INVALID))?;
+                        Ok((false, Some(duration), keep_display, lid_closed))
+                    }
+                },
+            )
             .ok_or_else(|| String::from("App state not initialized"))??;
         if is_active {
             self.stop_session();
             Ok(false)
         } else {
+            let use_lid = duration.is_some() && lid_closed;
+            if use_lid
+                && !crate::lid::is_authorized()
+                && let Err(err) = crate::lid::authorize()
+            {
+                self.show_error(&err);
+                return Err(err);
+            }
             self.start_session(duration, keep_display)?;
+            if use_lid {
+                match crate::lid::LidSession::start() {
+                    Ok(lid_session) => {
+                        let timer = self.schedule_timer(
+                            THERMAL_CHECK_INTERVAL,
+                            true,
+                            Self::check_thermal_state,
+                        );
+                        self.with_state_mut(|state| {
+                            state.lid = Some(lid_session);
+                            state.thermal_timer = Some(timer);
+                        });
+                    }
+                    Err(err) => {
+                        self.stop_session();
+                        self.show_error(&err);
+                        return Err(err);
+                    }
+                }
+            }
             Ok(true)
         }
     }
@@ -478,6 +523,10 @@ impl AppDelegate {
             state
                 .controls
                 .unit_popup
+                .setEnabled(projection.duration_enabled);
+            state
+                .controls
+                .lid_closed_button
                 .setEnabled(projection.duration_enabled);
 
             if let Some(countdown) = &projection.countdown_text {
@@ -641,8 +690,33 @@ impl AppDelegate {
         })
     }
 
-    /// Invalidates and releases the expiry and countdown timers.
+    /// Checks system thermal state and disables lid-closed mode if the Mac is too hot.
+    fn check_thermal_state(&self) {
+        let has_lid = self.with_state(|s| s.lid.is_some()).unwrap_or(false);
+        if !has_lid {
+            self.with_state_mut(Self::clear_lid_session);
+            return;
+        }
+        if crate::lid::thermal_too_hot() {
+            self.with_state_mut(|state| {
+                Self::clear_lid_session(state);
+                state.error_message = Some(String::from(NOTICE_THERMAL_CUTOFF));
+            });
+            self.update_ui();
+        }
+    }
+
+    /// Drops the active lid-closed session and invalidates its thermal guard timer.
+    fn clear_lid_session(state: &mut AppState) {
+        if let Some(timer) = state.thermal_timer.take() {
+            timer.invalidate();
+        }
+        state.lid = None;
+    }
+
+    /// Invalidates and releases the expiry, countdown, and thermal timers, and drops any lid session.
     fn invalidate_timers(state: &mut AppState) {
+        Self::clear_lid_session(state);
         if let Some(timer) = state.expiry_timer.take() {
             timer.invalidate();
         }
