@@ -9,12 +9,11 @@ use crate::ipc_server::IpcServer;
 use crate::power::PowerController;
 use crate::ui::{
     COUNTDOWN_AT_SEPARATOR, COUNTDOWN_STOPS_IN_PREFIX, COUNTDOWN_TIMER_TOLERANCE,
-    COUNTDOWN_UPDATE_INTERVAL, ERROR_DURATION_INVALID, ICON_ACTIVE, ICON_INACTIVE, MENU_HEIGHT,
-    MENU_WIDTH, TITLE_QUIT, UNIT_DAYS_INDEX, UNIT_MINUTES_INDEX, build_content_view,
-    compute_ui_projection,
+    COUNTDOWN_UPDATE_INTERVAL, ERROR_DURATION_INVALID, MENU_HEIGHT, MENU_WIDTH, PopoverControls,
+    TITLE_QUIT, UNIT_DAYS_INDEX, UNIT_MINUTES_INDEX, build_content_view, compute_ui_projection,
 };
 use app_core::duration::{DurationUnit, format_compact_duration, parse_duration};
-use app_core::ipc::{IpcCommand, IpcResponse};
+use app_core::ipc::{IpcCommand, IpcResponse, SessionStatus, socket_path};
 use block2::RcBlock;
 use objc2::encode::RefEncode;
 use objc2::rc::{Retained, Weak};
@@ -22,9 +21,8 @@ use objc2::runtime::AnyObject;
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSApplication, NSApplicationDelegate, NSButton, NSControl, NSControlStateValueOn, NSEvent,
-    NSEventMask, NSEventType, NSImage, NSMenu, NSMenuItem, NSPopUpButton, NSPopover,
-    NSPopoverBehavior, NSStatusBar, NSStatusBarButton, NSStatusItem, NSTextField,
-    NSVariableStatusItemLength, NSViewController,
+    NSEventMask, NSEventType, NSImage, NSMenu, NSMenuItem, NSPopover, NSPopoverBehavior,
+    NSStatusBar, NSStatusBarButton, NSStatusItem, NSVariableStatusItemLength, NSViewController,
 };
 use objc2_foundation::{
     NSDate, NSDateFormatter, NSDateFormatterStyle, NSNotification, NSObject, NSObjectProtocol,
@@ -36,20 +34,8 @@ pub struct AppState {
     pub status_item: Retained<NSStatusItem>,
     /// Transient popover containing application controls.
     pub popover: Retained<NSPopover>,
-    /// "Run indefinitely" checkbox.
-    pub indefinite_button: Retained<NSButton>,
-    /// Numeric duration input text field.
-    pub duration_field: Retained<NSTextField>,
-    /// Duration unit popup button.
-    pub unit_popup: Retained<NSPopUpButton>,
-    /// "Keep display awake too" checkbox.
-    pub display_awake_button: Retained<NSButton>,
-    /// Primary Start / Stop action button.
-    pub start_stop_button: Retained<NSButton>,
-    /// Countdown remaining time label.
-    pub time_label: Retained<NSTextField>,
-    /// Error message label.
-    pub error_label: Retained<NSTextField>,
+    /// Controls container owning all popover subviews.
+    pub controls: PopoverControls,
     /// Active power management controller.
     pub power: PowerController<IOKitProvider>,
     /// Retained global event monitor token for clicks outside the popover.
@@ -60,6 +46,10 @@ pub struct AppState {
     pub ipc_server: Option<IpcServer>,
     /// Single-shot timer to terminate power assertion upon duration expiry.
     pub expiry_timer: Option<Retained<NSTimer>>,
+    /// Cached external sleep-prevention application conflict notice.
+    pub conflict_notice: Option<String>,
+    /// Persisted validation or runtime error message.
+    pub error_message: Option<String>,
 }
 
 define_class!(
@@ -107,6 +97,7 @@ define_class!(
         /// Toggles popover or updates input enable states on control modification.
         #[unsafe(method(controlChanged:))]
         fn control_changed(&self, _sender: &NSControl) {
+            self.clear_error();
             self.update_ui();
         }
 
@@ -117,7 +108,6 @@ define_class!(
                 self.show_error(&error);
             }
         }
-
 
         /// Terminates the application when Quit is clicked in the context menu.
         #[unsafe(method(quit:))]
@@ -176,22 +166,24 @@ impl AppDelegate {
         let app_state = AppState {
             status_item,
             popover,
-            indefinite_button: controls.indefinite_button,
-            duration_field: controls.duration_field,
-            unit_popup: controls.unit_popup,
-            display_awake_button: controls.keep_display_awake_button,
-            start_stop_button: controls.start_stop_button,
-            time_label: controls.time_label,
-            error_label: controls.error_label,
+            controls,
             power: PowerController::new(IOKitProvider),
             outside_click_monitor: None,
             ipc_server: None,
             countdown_timer: None,
             expiry_timer: None,
+            conflict_notice: None,
+            error_message: None,
         };
 
         *self.ivars().borrow_mut() = Some(app_state);
-        let server = IpcServer::start(self);
+        let weak_self: Weak<Self> = Weak::from_retained(&Retained::from(self));
+        let server = IpcServer::start(mtm, &socket_path(), move |cmd| {
+            weak_self.load().map_or_else(
+                || IpcResponse::Err(String::from("App unavailable")),
+                |delegate| delegate.execute_ipc_command(cmd),
+            )
+        });
         if server.is_none() {
             eprintln!("Melaffeine: IPC server failed to start; CLI control unavailable");
         }
@@ -208,6 +200,8 @@ impl AppDelegate {
             return;
         }
 
+        let conflict = crate::conflicts::detect_external_conflict();
+        self.with_state_mut(|state| state.conflict_notice = conflict);
         self.update_ui();
         let mtm = MainThreadMarker::from(self);
         let app = NSApplication::sharedApplication(mtm);
@@ -294,42 +288,42 @@ impl AppDelegate {
     }
 
     /// Starts or updates power assertion based on UI inputs.
-    pub fn handle_start_stop(&self) -> Result<(), String> {
-        let is_active = self
-            .with_state(|state| state.power.is_active())
-            .unwrap_or(false);
+    ///
+    /// Returns `Ok(true)` if sleep prevention was started, `Ok(false)` if stopped.
+    pub fn handle_start_stop(&self) -> Result<bool, String> {
+        let (is_active, duration, keep_display) = self
+            .with_state(|state| -> Result<(bool, Option<Duration>, bool), String> {
+                let is_active = state.power.is_active();
+                if is_active {
+                    return Ok((true, None, false));
+                }
 
-        if is_active {
-            self.stop_power_and_expiry();
-            self.update_ui();
-            return Ok(());
-        }
-
-        let (duration, keep_display) = self
-            .with_state(|state| {
-                let indefinite = state.indefinite_button.state() == NSControlStateValueOn;
-                let keep_display = state.display_awake_button.state() == NSControlStateValueOn;
+                let indefinite = state.controls.indefinite_button.state() == NSControlStateValueOn;
+                let keep_display =
+                    state.controls.keep_display_awake_button.state() == NSControlStateValueOn;
 
                 if indefinite {
-                    (Ok(None), keep_display)
+                    Ok((false, None, keep_display))
                 } else {
-                    let input = state.duration_field.stringValue().to_string();
-                    let unit = match state.unit_popup.indexOfSelectedItem() {
+                    let input = state.controls.duration_field.stringValue().to_string();
+                    let unit = match state.controls.unit_popup.indexOfSelectedItem() {
                         UNIT_MINUTES_INDEX => DurationUnit::Minutes,
                         UNIT_DAYS_INDEX => DurationUnit::Days,
                         _ => DurationUnit::Hours,
                     };
-                    (
-                        parse_duration(input.trim(), unit)
-                            .map(Some)
-                            .ok_or_else(|| String::from(ERROR_DURATION_INVALID)),
-                        keep_display,
-                    )
+                    let duration = parse_duration(input.trim(), unit)
+                        .ok_or_else(|| String::from(ERROR_DURATION_INVALID))?;
+                    Ok((false, Some(duration), keep_display))
                 }
             })
-            .ok_or_else(|| String::from("App state not initialized"))?;
-
-        self.start_session(duration?, keep_display)
+            .ok_or_else(|| String::from("App state not initialized"))??;
+        if is_active {
+            self.stop_session();
+            Ok(false)
+        } else {
+            self.start_session(duration, keep_display)?;
+            Ok(true)
+        }
     }
 
     /// Starts a power assertion session for the specified duration and display setting.
@@ -340,6 +334,7 @@ impl AppDelegate {
     ) -> Result<(), String> {
         let start_result = self
             .with_state_mut(|state| {
+                state.error_message = None;
                 Self::invalidate_timers(state);
                 state
                     .power
@@ -365,45 +360,33 @@ impl AppDelegate {
         match command {
             IpcCommand::Status => self
                 .with_state(|state| {
-                    let ends_at = state.power.ends_at();
-                    let ends_at_unix = ends_at
-                        .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
-                        .map(|d| d.as_secs());
-                    let remaining_compact = ends_at.map(|t| {
-                        let rem = t
+                    if !state.power.is_active() {
+                        return IpcResponse::Status(None);
+                    }
+                    let remaining_compact = state.power.ends_at().map(|ends_at| {
+                        let remaining = ends_at
                             .duration_since(SystemTime::now())
                             .unwrap_or(Duration::ZERO);
-                        format_compact_duration(rem)
+                        format_compact_duration(remaining)
                     });
-                    IpcResponse::Status {
-                        is_active: state.power.is_active(),
+                    IpcResponse::Status(Some(SessionStatus {
                         keep_display_awake: state.power.keep_display_awake(),
-                        ends_at_unix,
                         remaining_compact,
-                    }
+                    }))
                 })
                 .unwrap_or_else(|| IpcResponse::Err(String::from("App not initialized"))),
             IpcCommand::Stop => {
-                self.stop_power_and_expiry();
-                self.update_ui();
+                self.stop_session();
                 IpcResponse::Ok(String::from("Stopped sleep prevention"))
             }
             // Toggle when inactive intentionally starts from the current UI control
             // state (duration field, unit popup, checkboxes), so remote toggling
             // reflects what the user last configured in the popover.
-            IpcCommand::Toggle => {
-                let is_active = self.with_state(|s| s.power.is_active()).unwrap_or(false);
-                if is_active {
-                    self.stop_power_and_expiry();
-                    self.update_ui();
-                    IpcResponse::Ok(String::from("Stopped sleep prevention"))
-                } else {
-                    match self.handle_start_stop() {
-                        Ok(()) => IpcResponse::Ok(String::from("Started sleep prevention")),
-                        Err(error) => IpcResponse::Err(error),
-                    }
-                }
-            }
+            IpcCommand::Toggle => match self.handle_start_stop() {
+                Ok(true) => IpcResponse::Ok(String::from("Started sleep prevention")),
+                Ok(false) => IpcResponse::Ok(String::from("Stopped sleep prevention")),
+                Err(error) => IpcResponse::Err(error),
+            },
             IpcCommand::Start {
                 duration,
                 keep_display_awake,
@@ -418,28 +401,26 @@ impl AppDelegate {
                 Err(e) => IpcResponse::Err(e),
             },
             IpcCommand::Quit => {
-                let block = self.weak_block::<NSTimer>(Self::terminate_app);
-                let _ = unsafe {
-                    NSTimer::scheduledTimerWithTimeInterval_repeats_block(0.05, false, &block)
-                };
+                self.schedule_timer(0.05, false, Self::terminate_app);
                 IpcResponse::Ok(String::from("Terminating"))
             }
         }
     }
 
-    /// Stops power assertion and invalidates expiry timer.
-    pub fn stop_power_and_expiry(&self) {
+    /// Stops the active session (power assertion and timers) and updates UI.
+    pub fn stop_session(&self) {
         self.with_state_mut(|state| {
             Self::invalidate_timers(state);
             state.power.stop();
         });
+        self.update_ui();
     }
 
     /// Schedules a one-shot expiry timer that re-checks the wall-clock end time on
     /// each fire, rescheduling for the true remainder if the run loop paused during
     /// system sleep. Stops the session when `ends_at` is absent or already past.
     fn schedule_expiry_timer(&self) {
-        let remaining = self.with_state_mut(|state| {
+        let remaining_opt = self.with_state_mut(|state| {
             if let Some(timer) = state.expiry_timer.take() {
                 timer.invalidate();
             }
@@ -449,27 +430,22 @@ impl AppDelegate {
                 .and_then(|ends_at| ends_at.duration_since(SystemTime::now()).ok())
                 .filter(|remaining| !remaining.is_zero())
         });
-        let Some(remaining) = remaining else {
-            return;
-        };
-        let Some(remaining) = remaining else {
-            self.stop_power_and_expiry();
-            self.update_ui();
-            return;
-        };
 
-        let block = self.weak_block::<NSTimer>(Self::schedule_expiry_timer);
-        // SAFETY: scheduledTimerWithTimeInterval_repeats_block is called on the main thread.
-        let timer = unsafe {
-            NSTimer::scheduledTimerWithTimeInterval_repeats_block(
-                remaining.as_secs_f64(),
-                false,
-                &block,
-            )
-        };
-        self.with_state_mut(|state| state.expiry_timer = Some(timer));
+        match remaining_opt {
+            Some(Some(remaining)) => {
+                let timer = self.schedule_timer(
+                    remaining.as_secs_f64(),
+                    false,
+                    Self::schedule_expiry_timer,
+                );
+                self.with_state_mut(|state| state.expiry_timer = Some(timer));
+            }
+            Some(None) => {
+                self.stop_session();
+            }
+            None => {}
+        }
     }
-
     /// Synchronizes all native UI elements to match current power and settings projection.
     pub fn update_ui(&self) {
         let updated = self.with_state(|state| {
@@ -478,46 +454,70 @@ impl AppDelegate {
             let indefinite = if active {
                 ends_at.is_none()
             } else {
-                state.indefinite_button.state() == NSControlStateValueOn
+                state.controls.indefinite_button.state() == NSControlStateValueOn
             };
             let countdown_text = self.format_countdown(ends_at);
             let projection = compute_ui_projection(active, indefinite, countdown_text);
 
             state
+                .controls
                 .start_stop_button
                 .setTitle(&NSString::from_str(projection.start_stop_title));
             state
+                .controls
                 .indefinite_button
-                .setEnabled(projection.indefinite_enabled);
-            state.duration_field.setEnabled(projection.duration_enabled);
-            state.unit_popup.setEnabled(projection.unit_enabled);
+                .setEnabled(projection.inputs_enabled);
             state
-                .display_awake_button
-                .setEnabled(projection.display_enabled);
+                .controls
+                .keep_display_awake_button
+                .setEnabled(projection.inputs_enabled);
+            state
+                .controls
+                .duration_field
+                .setEnabled(projection.duration_enabled);
+            state
+                .controls
+                .unit_popup
+                .setEnabled(projection.duration_enabled);
 
             if let Some(countdown) = &projection.countdown_text {
                 state
+                    .controls
                     .time_label
                     .setStringValue(&NSString::from_str(countdown));
-                state.time_label.setHidden(false);
+                state.controls.time_label.setHidden(false);
             } else {
-                state.time_label.setStringValue(&NSString::from_str(""));
-                state.time_label.setHidden(true);
-            }
-            state.error_label.setStringValue(&NSString::from_str(""));
-            state.error_label.setHidden(true);
-            if !active && let Some(conflict_app) = crate::conflicts::detect_external_conflict() {
                 state
+                    .controls
+                    .time_label
+                    .setStringValue(&NSString::from_str(""));
+                state.controls.time_label.setHidden(true);
+            }
+
+            if let Some(err) = &state.error_message {
+                state
+                    .controls
+                    .error_label
+                    .setStringValue(&NSString::from_str(err));
+                state.controls.error_label.setHidden(false);
+            } else if !active && let Some(conflict_app) = &state.conflict_notice {
+                state
+                    .controls
                     .error_label
                     .setStringValue(&NSString::from_str(&format!(
                         "Note: {conflict_app} is also running."
                     )));
-                state.error_label.setHidden(false);
+                state.controls.error_label.setHidden(false);
+            } else {
+                state
+                    .controls
+                    .error_label
+                    .setStringValue(&NSString::from_str(""));
+                state.controls.error_label.setHidden(true);
             }
 
-            let symbol_name = if active { ICON_ACTIVE } else { ICON_INACTIVE };
             if let Some(image) = NSImage::imageWithSystemSymbolName_accessibilityDescription(
-                &NSString::from_str(symbol_name),
+                &NSString::from_str(projection.status_icon),
                 Some(&NSString::from_str("Melaffeine")),
             ) {
                 image.setTemplate(true);
@@ -558,19 +558,21 @@ impl AppDelegate {
         ))
     }
 
-    /// Displays an error message on the error label and unhides it.
     pub fn show_error(&self, message: &str) {
-        self.with_state(|state| {
-            state
-                .error_label
-                .setStringValue(&NSString::from_str(message));
-            state.error_label.setHidden(false);
-            state.time_label.setStringValue(&NSString::from_str(""));
-            state.time_label.setHidden(true);
+        self.with_state_mut(|state| {
+            state.error_message = Some(message.to_string());
         });
+        self.update_ui();
     }
 
-    /// Starts repeating countdown timer if popover is open for an active finite session.
+    /// Clears any displayed error message and updates UI.
+    pub fn clear_error(&self) {
+        self.with_state_mut(|state| {
+            state.error_message = None;
+        });
+        self.update_ui();
+    }
+
     pub fn start_countdown_timer_if_needed(&self) {
         let should_start = self
             .with_state(|s| {
@@ -585,16 +587,7 @@ impl AppDelegate {
             return;
         }
 
-        let block = self.weak_block::<NSTimer>(Self::update_ui);
-
-        // SAFETY: scheduledTimerWithTimeInterval_repeats_block is called on the main thread.
-        let timer = unsafe {
-            NSTimer::scheduledTimerWithTimeInterval_repeats_block(
-                COUNTDOWN_UPDATE_INTERVAL,
-                true,
-                &block,
-            )
-        };
+        let timer = self.schedule_timer(COUNTDOWN_UPDATE_INTERVAL, true, Self::update_ui);
         timer.setTolerance(COUNTDOWN_TIMER_TOLERANCE);
 
         self.with_state_mut(|state| state.countdown_timer = Some(timer));
@@ -617,8 +610,7 @@ impl AppDelegate {
             }
         });
         self.remove_outside_click_monitor();
-        self.stop_countdown_timer();
-        self.stop_power_and_expiry();
+        self.stop_session();
     }
 
     /// Runs `f` with a shared borrow of the app state, if initialized.
@@ -629,6 +621,14 @@ impl AppDelegate {
     /// Runs `f` with an exclusive borrow of the app state, if initialized.
     fn with_state_mut<R>(&self, f: impl FnOnce(&mut AppState) -> R) -> Option<R> {
         self.ivars().borrow_mut().as_mut().map(f)
+    }
+
+    /// Schedules an `NSTimer` on the main run loop invoking `action` on a weakly-held delegate.
+    fn schedule_timer(&self, interval: f64, repeats: bool, action: fn(&Self)) -> Retained<NSTimer> {
+        let block = self.weak_block::<NSTimer>(action);
+        // SAFETY: scheduledTimerWithTimeInterval_repeats_block is called on the main thread
+        // with an interval >= 0, and the weak block safely drops invocations if deallocated.
+        unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(interval, repeats, &block) }
     }
 
     /// Builds a block that invokes `f` on a weakly-held delegate, no-op after dealloc.

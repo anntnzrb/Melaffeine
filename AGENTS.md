@@ -35,7 +35,7 @@ Key patterns:
 - `PowerController` is generic over `AssertionProvider` (RAII handle drop semantics) and manages active session timestamps and display mode.
 - `UiProjection` computes UI presentation state purely and deterministically from model state.
 - Unsafe code is strictly forbidden in `app-core` and isolated to narrow, documented Apple framework adapters in `app`.
-- No `Arc<Mutex<_>>`, no async runtime, no thread pools. Main run loop timers (`NSTimer`) handle finite expiry and countdown ticks.
+- No `Arc<Mutex<_>>`, no async runtime, no thread pools. Main run loop timers (`NSTimer`) handle finite expiry and countdown ticks. The IPC server uses a single background accept thread that dispatches each command synchronously onto the main queue (dispatch2) — no thread pool, no polling timer.
 - No persisted runtime state. Active sessions die with the process.
 
 ## Key Directories
@@ -95,10 +95,15 @@ Cargo.toml                               Workspace manifest & lint configuration
 clippy.toml                              Clippy configuration
 crates/app-core/src/lib.rs               Core domain entry point
 crates/app-core/src/duration.rs          Duration parsing and compact formatting
+crates/app-core/src/ipc.rs               Shared IPC protocol types, framing, and client
 crates/app/src/main.rs                   App entry point & NSApplication bootstrap
 crates/app/src/app_delegate.rs           NSApplicationDelegate & AppKit lifecycle
 crates/app/src/ui.rs                     Popover UI layout & UiProjection
 crates/app/src/power.rs                  PowerController & assertion session model
+crates/app/src/ipc_server.rs             Unix domain socket IPC listener and dispatcher
+crates/app/src/conflicts.rs              Conflicting assertion detection
+crates/app/src/iokit.rs                  IOKit assertion provider adapter
+crates/cli/src/main.rs                   CLI controller entry point
 Resources/Info.plist                     Bundle Info.plist definition
 justfile                                 Primary command runner (POSIX /bin/sh)
 flake.nix                                Pinned Nix flake using flake-parts, crane, fenix
@@ -133,7 +138,7 @@ pkill -x Melaffeine
 Functional QA checklist:
 - no Dock icon appears
 - outline cup (`cup.and.saucer`) when off, filled cup (`cup.and.saucer.fill`) when on
-- left-click opens aligned 260x174 popover
+- left-click opens the popover anchored under the icon
 - click away closes popover
 - right-click shows Quit with no shortcut hint
 - Start creates assertion and button becomes Stop

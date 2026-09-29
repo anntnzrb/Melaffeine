@@ -5,36 +5,21 @@ use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::ptr::NonNull;
-use std::rc::Rc;
 use std::sync::{
-    Arc, Mutex,
-    mpsc::{self, SyncSender, TryRecvError, TrySendError},
+    Arc,
+    atomic::{AtomicBool, Ordering},
 };
 use std::thread;
 use std::time::Duration;
 
-use app_core::ipc::{IpcCommand, IpcResponse, socket_path};
-use block2::RcBlock;
-use objc2::rc::{Retained, Weak};
-use objc2_foundation::NSTimer;
+use app_core::ipc::{IpcCommand, IpcResponse, MAX_FRAME_BYTES, send_command};
+use dispatch2::MainThreadBound;
+use objc2::MainThreadMarker;
 
-use crate::app_delegate::AppDelegate;
-
-/// Interval for checking incoming IPC connections on the main runloop.
-const IPC_POLL_INTERVAL_SECS: f64 = 0.05;
-/// Maximum number of bytes allowed in one newline-terminated command frame.
-const MAX_COMMAND_BYTES: usize = 4_096;
-/// Maximum number of bytes read while looking for a command frame terminator.
-const MAX_COMMAND_READ_BYTES: u64 = 4_097;
-/// Timeout for each individual IPC read, write, and main-thread response.
+/// Timeout for each individual IPC read and write operation.
 const IPC_IO_TIMEOUT: Duration = Duration::from_secs(1);
-/// Maximum number of accepted streams and parsed requests buffered at once.
-const IPC_QUEUE_DEPTH: usize = 32;
-/// Number of worker threads serving accepted IPC streams.
-const IPC_WORKERS: usize = 4;
 
-type Request = (IpcCommand, SyncSender<IpcResponse>);
+type Handler = Box<dyn Fn(&IpcCommand) -> IpcResponse>;
 
 fn remove_socket_if_owned(path: &Path, identity: (u64, u64)) {
     if let Ok(metadata) = fs::symlink_metadata(path)
@@ -46,26 +31,7 @@ fn remove_socket_if_owned(path: &Path, identity: (u64, u64)) {
 
 /// Probes whether a live IPC owner still answers STATUS on `path`.
 fn probe_live_owner(path: &Path) -> bool {
-    let Ok(mut stream) = UnixStream::connect(path) else {
-        return false;
-    };
-    let _ = stream.set_read_timeout(Some(IPC_IO_TIMEOUT));
-    let _ = stream.set_write_timeout(Some(IPC_IO_TIMEOUT));
-    if stream
-        .write_all(IpcCommand::Status.serialize().as_bytes())
-        .is_err()
-    {
-        return false;
-    }
-    let mut reply = Vec::new();
-    let read = BufReader::new((&stream).take(MAX_COMMAND_READ_BYTES)).read_until(b'\n', &mut reply);
-    if !matches!(read, Ok(length) if length > 0) {
-        return false;
-    }
-    let Ok(line) = std::str::from_utf8(&reply) else {
-        return false;
-    };
-    IpcResponse::parse(line).is_some()
+    send_command(path, &IpcCommand::Status, IPC_IO_TIMEOUT).is_ok()
 }
 
 fn bind_listener(path: &Path) -> Option<(UnixListener, (u64, u64))> {
@@ -88,126 +54,83 @@ fn bind_listener(path: &Path) -> Option<(UnixListener, (u64, u64))> {
     Some((listener, (metadata.dev(), metadata.ino())))
 }
 
-fn serve_connection(mut stream: UnixStream, requests: &SyncSender<Request>) {
+fn serve_connection(mut stream: UnixStream, handler: impl FnOnce(&IpcCommand) -> IpcResponse) {
     let _ = stream.set_nonblocking(false);
     let _ = stream.set_read_timeout(Some(IPC_IO_TIMEOUT));
     let _ = stream.set_write_timeout(Some(IPC_IO_TIMEOUT));
 
-    let fail = |s: &mut UnixStream, msg: &[u8]| {
-        let _ = s.write_all(msg);
-    };
-
+    let limit = u64::try_from(MAX_FRAME_BYTES.saturating_add(1)).unwrap_or(u64::MAX);
     let mut frame = Vec::new();
-    let read = BufReader::new((&stream).take(MAX_COMMAND_READ_BYTES)).read_until(b'\n', &mut frame);
+    let read = BufReader::new((&stream).take(limit)).read_until(b'\n', &mut frame);
     if !matches!(read, Ok(length) if length > 0)
-        || frame.len() > MAX_COMMAND_BYTES
+        || frame.len() > MAX_FRAME_BYTES
         || frame.last() != Some(&b'\n')
     {
-        fail(&mut stream, b"ERR invalid frame\n");
+        let _ = stream.write_all(b"ERR invalid frame\n");
         return;
     }
 
     let Some(command) = std::str::from_utf8(&frame).ok().and_then(IpcCommand::parse) else {
-        fail(&mut stream, b"ERR invalid command\n");
+        let _ = stream.write_all(b"ERR invalid command\n");
         return;
     };
 
-    let (response_tx, response_rx) = mpsc::sync_channel(1);
-    if requests.send((command, response_tx)).is_err() {
-        fail(&mut stream, b"ERR server stopping\n");
-        return;
-    }
-
-    if let Ok(response) = response_rx.recv_timeout(IPC_IO_TIMEOUT) {
-        let _ = stream.write_all(response.serialize().as_bytes());
-    } else {
-        fail(&mut stream, b"ERR server timeout\n");
-    }
+    let response = handler(&command);
+    let _ = stream.write_all(response.serialize().as_bytes());
 }
 
 /// Active Unix Domain Socket IPC server.
 pub struct IpcServer {
-    _listener: Rc<UnixListener>,
     path: PathBuf,
     socket_identity: (u64, u64),
-    timer: Option<Retained<NSTimer>>,
+    stopping: Arc<AtomicBool>,
 }
 
 impl IpcServer {
-    /// Starts the IPC server and attaches the polling timer to the main run loop.
-    pub fn start(delegate: &AppDelegate) -> Option<Self> {
-        let path = socket_path();
-        let (listener, socket_identity) = bind_listener(&path)?;
-        if listener.set_nonblocking(true).is_err() {
-            remove_socket_if_owned(&path, socket_identity);
-            return None;
-        }
+    /// Starts the IPC server with a background accept thread that dispatches commands to the main thread.
+    pub fn start(
+        mtm: MainThreadMarker,
+        path: &Path,
+        handler: impl Fn(&IpcCommand) -> IpcResponse + 'static,
+    ) -> Option<Self> {
+        let (listener, socket_identity) = bind_listener(path)?;
+        let stopping = Arc::new(AtomicBool::new(false));
+        let boxed_handler: Handler = Box::new(handler);
+        let bound_handler = MainThreadBound::new(boxed_handler, mtm);
 
-        let (stream_tx, stream_rx) = mpsc::sync_channel::<UnixStream>(IPC_QUEUE_DEPTH);
-        let (request_tx, request_rx) = mpsc::sync_channel::<Request>(IPC_QUEUE_DEPTH);
-        let stream_rx = Arc::new(Mutex::new(stream_rx));
-
-        for _ in 0..IPC_WORKERS {
-            let worker_rx = Arc::clone(&stream_rx);
-            let worker_requests = request_tx.clone();
-            let _worker = thread::spawn(move || {
-                while let Some(stream) = worker_rx.lock().ok().and_then(|rx| rx.recv().ok()) {
-                    serve_connection(stream, &worker_requests);
-                }
-            });
-        }
-        drop(request_tx);
-
-        let listener_rc = Rc::new(listener);
-        let listener_clone = Rc::clone(&listener_rc);
-        let weak_delegate: Weak<AppDelegate> = Weak::from_retained(&Retained::from(delegate));
-        let block = RcBlock::new(move |_timer: NonNull<NSTimer>| {
-            for _ in 0..IPC_QUEUE_DEPTH {
-                match listener_clone.accept() {
-                    Ok((stream, _)) => match stream_tx.try_send(stream) {
-                        Ok(()) | Err(TrySendError::Full(_)) => {}
-                        Err(TrySendError::Disconnected(_)) => break,
-                    },
-                    Err(error) if error.kind() == ErrorKind::WouldBlock => break,
-                    Err(_) => break,
-                }
-            }
-
-            for _ in 0..IPC_QUEUE_DEPTH {
-                match request_rx.try_recv() {
-                    Ok((command, response_tx)) => {
-                        let response = weak_delegate.load().map_or_else(
-                            || IpcResponse::Err(String::from("App unavailable")),
-                            |delegate| delegate.execute_ipc_command(&command),
-                        );
-                        let _ = response_tx.try_send(response);
+        let worker_stopping = Arc::clone(&stopping);
+        drop(thread::spawn(move || {
+            loop {
+                let stream = match listener.accept() {
+                    Ok((stream, _)) => stream,
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            ErrorKind::Interrupted | ErrorKind::ConnectionAborted
+                        ) && !worker_stopping.load(Ordering::Acquire) =>
+                    {
+                        continue;
                     }
-                    Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
+                    Err(_) => break,
+                };
+                if worker_stopping.load(Ordering::Acquire) {
+                    break;
                 }
+                serve_connection(stream, |command| bound_handler.get_on_main(|h| h(command)));
             }
-        });
-
-        // SAFETY: scheduledTimerWithTimeInterval_repeats_block is called on the main thread.
-        let timer = unsafe {
-            NSTimer::scheduledTimerWithTimeInterval_repeats_block(
-                IPC_POLL_INTERVAL_SECS,
-                true,
-                &block,
-            )
-        };
+        }));
 
         Some(Self {
-            _listener: listener_rc,
-            path,
+            path: path.to_path_buf(),
             socket_identity,
-            timer: Some(timer),
+            stopping,
         })
     }
 
-    /// Stops the server, invalidates the runloop timer, and removes its socket file.
+    /// Stops the server, wakes the accept thread, and removes its socket file if owned.
     pub fn stop(&mut self) {
-        if let Some(timer) = self.timer.take() {
-            timer.invalidate();
+        if !self.stopping.swap(true, Ordering::AcqRel) {
+            let _ = UnixStream::connect(&self.path);
         }
         remove_socket_if_owned(&self.path, self.socket_identity);
     }
@@ -235,22 +158,15 @@ mod tests {
         ))
     }
 
-    fn spawn_server(
-        read_timeout: Duration,
-    ) -> std::io::Result<(UnixStream, mpsc::Receiver<Request>, thread::JoinHandle<()>)> {
-        let (server, client) = UnixStream::pair()?;
-        client.set_read_timeout(Some(read_timeout))?;
-        let (request_tx, request_rx) = mpsc::sync_channel(1);
-        let worker = thread::spawn(move || serve_connection(server, &request_tx));
-        Ok((client, request_rx, worker))
-    }
-
     fn run_server(
         frame: &[u8],
         read_timeout: Duration,
+        handler: impl FnOnce(&IpcCommand) -> IpcResponse + Send + 'static,
         expected: &[u8],
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let (mut client, _request_rx, worker) = spawn_server(read_timeout)?;
+        let (server, mut client) = UnixStream::pair()?;
+        client.set_read_timeout(Some(read_timeout))?;
+        let worker = thread::spawn(move || serve_connection(server, handler));
         client.write_all(frame)?;
         let mut response = Vec::new();
         client.read_to_end(&mut response)?;
@@ -261,18 +177,25 @@ mod tests {
 
     #[test]
     fn complete_frame_gets_response() -> Result<(), Box<dyn std::error::Error>> {
-        let (mut client, request_rx, worker) = spawn_server(IPC_IO_TIMEOUT)?;
+        run_server(
+            b"STATUS\n",
+            IPC_IO_TIMEOUT,
+            |command| {
+                assert_eq!(command, &IpcCommand::Status);
+                IpcResponse::Ok(String::from("ready"))
+            },
+            b"OK ready\n",
+        )
+    }
 
-        client.write_all(b"STATUS\n")?;
-        let (command, response_tx) = request_rx.recv_timeout(IPC_IO_TIMEOUT)?;
-        assert_eq!(command, IpcCommand::Status);
-        response_tx.send(IpcResponse::Ok(String::from("ready")))?;
-
-        let mut response = Vec::new();
-        client.read_to_end(&mut response)?;
-        assert_eq!(response, b"OK ready\n");
-        assert!(worker.join().is_ok());
-        Ok(())
+    #[test]
+    fn invalid_command_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
+        run_server(
+            b"INVALID\n",
+            IPC_IO_TIMEOUT,
+            |_| IpcResponse::Ok(String::from("unreachable")),
+            b"ERR invalid command\n",
+        )
     }
 
     #[test]
@@ -280,14 +203,20 @@ mod tests {
         run_server(
             b"STATUS",
             IPC_IO_TIMEOUT.saturating_mul(2),
+            |_| IpcResponse::Ok(String::from("unreachable")),
             b"ERR invalid frame\n",
         )
     }
 
     #[test]
     fn oversized_frame_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
-        let frame = vec![b'x'; MAX_COMMAND_BYTES + 1];
-        run_server(&frame, IPC_IO_TIMEOUT, b"ERR invalid frame\n")
+        let frame = vec![b'x'; MAX_FRAME_BYTES.saturating_add(1)];
+        run_server(
+            &frame,
+            IPC_IO_TIMEOUT,
+            |_| IpcResponse::Ok(String::from("unreachable")),
+            b"ERR invalid frame\n",
+        )
     }
 
     #[test]
@@ -328,8 +257,7 @@ mod tests {
             let (stream, _) = live_listener.accept()?;
             let mut reply = Vec::new();
             BufReader::new(&stream).read_until(b'\n', &mut reply)?;
-            (&stream)
-                .write_all(b"STATUS active=false display=false ends_at=none remaining=none\n")?;
+            (&stream).write_all(b"STATUS inactive\n")?;
             std::io::Result::Ok(())
         });
         assert!(
