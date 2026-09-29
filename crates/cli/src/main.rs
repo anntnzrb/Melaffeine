@@ -1,5 +1,7 @@
 //! Melaffeine CLI controller for managing sleep prevention sessions.
 
+use std::io::{self, ErrorKind};
+use std::path::Path;
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -86,16 +88,29 @@ fn run_cli(cli: Cli) -> Result<String, String> {
     };
 
     let path = socket_path();
-    let response = send_command(&path, &command, Duration::from_secs(5)).map_err(|_| {
-        format!(
-            "Could not connect to Melaffeine at {}.\nIs Melaffeine.app running?",
-            path.display()
-        )
-    })?;
+    let response = send_command(&path, &command, Duration::from_secs(5))
+        .map_err(|error| format_ipc_error(&path, &error))?;
 
     match response {
         IpcResponse::Err(error) => Err(error),
         other => Ok(other.to_string()),
+    }
+}
+
+fn format_ipc_error(path: &Path, error: &io::Error) -> String {
+    match error.kind() {
+        ErrorKind::NotFound | ErrorKind::ConnectionRefused => format!(
+            "Melaffeine is not running (no listener at {}). Open Melaffeine.app first.",
+            path.display()
+        ),
+        ErrorKind::TimedOut | ErrorKind::WouldBlock => String::from(
+            "Melaffeine is running but did not respond in time. Check that its password prompt or popover isn't waiting for you.",
+        ),
+        ErrorKind::InvalidData => format!("Unexpected response from Melaffeine: {error}"),
+        _ => format!(
+            "Could not talk to Melaffeine at {}: {error}",
+            path.display()
+        ),
     }
 }
 
@@ -141,5 +156,25 @@ mod tests {
     fn test_run_cli_invalid_duration() {
         let cli = Cli::try_parse_from(["melaffeine", "start", "invalid_duration"]).unwrap();
         assert!(run_cli(cli).is_err());
+    }
+
+    #[test]
+    fn test_format_ipc_error_categories() {
+        let path = Path::new("/tmp/melaffeine-test.sock");
+        for (kind, expected_substring) in [
+            (ErrorKind::NotFound, "not running"),
+            (ErrorKind::ConnectionRefused, "not running"),
+            (ErrorKind::TimedOut, "did not respond in time"),
+            (ErrorKind::WouldBlock, "did not respond in time"),
+            (ErrorKind::InvalidData, "Unexpected response"),
+            (ErrorKind::PermissionDenied, "Could not talk to Melaffeine"),
+        ] {
+            let error = io::Error::new(kind, "synthetic detail");
+            let message = format_ipc_error(path, &error);
+            assert!(
+                message.contains(expected_substring),
+                "kind {kind:?} produced {message:?}, expected substring {expected_substring:?}"
+            );
+        }
     }
 }
