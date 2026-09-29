@@ -10,9 +10,22 @@ Tiny native macOS menu-bar utility for keeping the Mac awake.
 - Duration: minutes, hours, days, or indefinite.
 - Finite sessions show remaining time and stop clock time in the popover.
 - Optional: keep display awake too.
+- Optional: keep running with lid closed (finite timers only).
 - No persisted active state after reboot/relaunch.
 - No Dock icon.
 - Full CLI control via `melaffeine` command-line tool (Unix domain socket IPC).
+
+## Keep running with lid closed
+
+For finite timers, check **Keep running with lid closed** before clicking **Start** so you can close the lid and put your MacBook in a bag while a job finishes. This option is disabled when **Run indefinitely** is checked so the Mac cannot stay awake forever in a closed bag.
+
+- **One-time setup prompt:** The first time you start a lid-closed session, macOS asks for an administrator password once to install `/etc/sudoers.d/melaffeine`, which grants passwordless access strictly to `/usr/bin/pmset -a disablesleep 1` and `/usr/bin/pmset -a disablesleep 0`. Subsequent runs do not prompt.
+- **Heat cutoff:** While lid-closed mode is active, Melaffeine checks system thermal state every 30 seconds. If the Mac reaches a serious or critical thermal state, lid-closed mode is turned off automatically (the normal awake session continues, and the Mac will sleep if the lid is closed).
+- **Network caveat:** Moving between locations or switching Wi-Fi networks while your Mac is in a bag will still drop non-resumable connections (such as plain SSH sessions).
+- **Uninstall helper rule:** To remove the passwordless `pmset` rule at any time, run:
+  ```sh
+  sudo rm /etc/sudoers.d/melaffeine
+  ```
 
 ## Installation
 
