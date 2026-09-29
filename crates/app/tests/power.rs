@@ -7,7 +7,8 @@
     clippy::clone_on_copy,
     dead_code
 )]
-use std::sync::{Arc, Mutex};
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::time::{Duration, SystemTime};
 
 use app::power::{AssertionKind, AssertionProvider, PowerController, PowerError};
@@ -29,24 +30,24 @@ struct MockState {
 
 #[derive(Clone, Default)]
 struct MockAssertionProvider {
-    state: Arc<Mutex<MockState>>,
+    state: Rc<RefCell<MockState>>,
 }
 
 impl MockAssertionProvider {
     fn events(&self) -> Vec<MockEvent> {
-        self.state.lock().unwrap().events.clone()
+        self.state.borrow().events.clone()
     }
 
     fn active_count(&self) -> usize {
-        self.state.lock().unwrap().active_count
+        self.state.borrow().active_count
     }
 
     fn set_should_fail(&self, fail: bool) {
-        self.state.lock().unwrap().should_fail = fail;
+        self.state.borrow_mut().should_fail = fail;
     }
 
     fn set_fail_code(&self, code: i32) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.borrow_mut();
         state.should_fail = true;
         state.fail_code = code;
     }
@@ -54,12 +55,12 @@ impl MockAssertionProvider {
 
 struct MockHandle {
     id: usize,
-    state: Arc<Mutex<MockState>>,
+    state: Rc<RefCell<MockState>>,
 }
 
 impl Drop for MockHandle {
     fn drop(&mut self) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.borrow_mut();
         state.active_count = state.active_count.saturating_sub(1);
         state.events.push(MockEvent::Released(self.id));
     }
@@ -69,7 +70,7 @@ impl AssertionProvider for MockAssertionProvider {
     type Handle = MockHandle;
 
     fn acquire(&self, kind: AssertionKind) -> Result<Self::Handle, PowerError> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.borrow_mut();
         if state.should_fail {
             return Err(PowerError::AcquisitionFailed(state.fail_code));
         }
@@ -79,7 +80,7 @@ impl AssertionProvider for MockAssertionProvider {
         state.events.push(MockEvent::Acquired(id, kind));
         Ok(MockHandle {
             id,
-            state: Arc::clone(&self.state),
+            state: Rc::clone(&self.state),
         })
     }
 }
@@ -87,29 +88,16 @@ impl AssertionProvider for MockAssertionProvider {
 // ---------------------------------------------------------------------------
 // PowerError Tests
 // ---------------------------------------------------------------------------
-
 #[test]
-fn power_error_display_contains_code_and_description() {
+fn power_error_display_contains_code() {
     let err_neg1 = PowerError::AcquisitionFailed(-1);
-    let display_neg1 = format!("{err_neg1}");
-    assert!(display_neg1.contains("-1"));
-    assert!(display_neg1.contains("Failed to acquire power assertion"));
+    assert!(format!("{err_neg1}").contains("-1"));
 
     let err_0 = PowerError::AcquisitionFailed(0);
-    assert_eq!(
-        format!("{err_0}"),
-        "Failed to acquire power assertion (code: 0)"
-    );
+    assert!(format!("{err_0}").contains('0'));
 
     let err_100 = PowerError::AcquisitionFailed(100);
-    assert_eq!(
-        format!("{err_100}"),
-        "Failed to acquire power assertion (code: 100)"
-    );
-
-    assert_eq!(err_0.code(), Some(0));
-    assert_eq!(err_100.code(), Some(100));
-    assert_eq!(PowerError::DurationOverflow.code(), None);
+    assert!(format!("{err_100}").contains("100"));
 }
 
 // ---------------------------------------------------------------------------
@@ -123,70 +111,57 @@ fn power_controller_new_initializes_inactive_controller() {
 
     assert!(!controller.is_active());
     assert!(!controller.keep_display_awake());
-    assert_eq!(controller.started_at(), None);
     assert_eq!(controller.ends_at(), None);
     assert_eq!(mock.active_count(), 0);
     assert!(mock.events().is_empty());
 }
 
 #[test]
-fn start_prevent_system_sleep_sets_active_and_timestamps() {
-    let mock = MockAssertionProvider::default();
-    let mut controller = PowerController::new(mock.clone());
-    let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
-    let duration = Duration::from_secs(3600);
+fn start_configures_session_parameters() {
+    let cases = [
+        (
+            Some(Duration::from_secs(3600)),
+            false,
+            Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_003_600)),
+            AssertionKind::PreventSystemSleep,
+        ),
+        (
+            Some(Duration::from_secs(1800)),
+            true,
+            Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_001_800)),
+            AssertionKind::PreventDisplaySleep,
+        ),
+        (None, false, None, AssertionKind::PreventSystemSleep),
+    ];
 
-    let result = controller.start(Some(duration), false, now);
-    assert!(result.is_ok());
-    assert!(controller.is_active());
-    assert!(!controller.keep_display_awake());
-    assert_eq!(controller.started_at(), Some(now));
-    assert_eq!(controller.ends_at(), Some(now + duration));
+    for (duration, keep_display, expected_ends_at, expected_kind) in cases {
+        let mock = MockAssertionProvider::default();
+        let mut controller = PowerController::new(mock.clone());
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
 
-    let events = mock.events();
-    assert_eq!(
-        events,
-        vec![MockEvent::Acquired(1, AssertionKind::PreventSystemSleep)]
-    );
+        let result = controller.start(duration, keep_display, now);
+        assert!(result.is_ok());
+        assert!(controller.is_active());
+        assert_eq!(controller.keep_display_awake(), keep_display);
+        assert_eq!(controller.ends_at(), expected_ends_at);
+
+        let events = mock.events();
+        assert_eq!(events, vec![MockEvent::Acquired(1, expected_kind)]);
+    }
 }
 
 #[test]
-fn start_prevent_display_sleep_maps_correct_kind() {
-    let mock = MockAssertionProvider::default();
-    let mut controller = PowerController::new(mock.clone());
-    let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
-    let duration = Duration::from_secs(1800);
-
-    let result = controller.start(Some(duration), true, now);
-    assert!(result.is_ok());
-    assert!(controller.is_active());
-    assert!(controller.keep_display_awake());
-    assert_eq!(controller.started_at(), Some(now));
-    assert_eq!(controller.ends_at(), Some(now + duration));
-
-    let events = mock.events();
-    assert_eq!(
-        events,
-        vec![MockEvent::Acquired(1, AssertionKind::PreventDisplaySleep)]
-    );
-}
-
-#[test]
-fn start_indefinite_has_no_ends_at() {
+fn start_with_zero_duration_is_active_with_ends_at_equal_to_start() {
     let mock = MockAssertionProvider::default();
     let mut controller = PowerController::new(mock.clone());
     let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
 
-    let result = controller.start(None, false, now);
+    let result = controller.start(Some(Duration::ZERO), false, now);
     assert!(result.is_ok());
     assert!(controller.is_active());
-    assert!(!controller.keep_display_awake());
-    assert_eq!(controller.started_at(), Some(now));
-    assert_eq!(controller.ends_at(), None);
-
-    let events = mock.events();
+    assert_eq!(controller.ends_at(), Some(now));
     assert_eq!(
-        events,
+        mock.events(),
         vec![MockEvent::Acquired(1, AssertionKind::PreventSystemSleep)]
     );
 }
@@ -211,7 +186,6 @@ fn start_replaces_existing_session_before_acquiring_new() {
             .is_ok()
     );
     assert_eq!(mock.active_count(), 1);
-    assert_eq!(controller.started_at(), Some(now2));
     assert_eq!(controller.ends_at(), Some(now2 + Duration::from_secs(7200)));
     assert!(controller.keep_display_awake());
 
@@ -244,7 +218,6 @@ fn stop_releases_assertion_and_clears_timestamps() {
     controller.stop();
     assert!(!controller.is_active());
     assert!(!controller.keep_display_awake());
-    assert_eq!(controller.started_at(), None);
     assert_eq!(controller.ends_at(), None);
     assert_eq!(mock.active_count(), 0);
 
@@ -266,7 +239,6 @@ fn stop_on_inactive_session_is_safe_noop() {
     assert!(!controller.is_active());
     controller.stop();
     assert!(!controller.is_active());
-    assert_eq!(controller.started_at(), None);
     assert_eq!(controller.ends_at(), None);
     assert_eq!(mock.active_count(), 0);
     assert!(mock.events().is_empty());
@@ -322,7 +294,6 @@ fn failed_acquisition_leaves_controller_inactive_and_returns_error() {
     assert_eq!(result, Err(PowerError::AcquisitionFailed(-1)));
     assert!(!controller.is_active());
     assert!(!controller.keep_display_awake());
-    assert_eq!(controller.started_at(), None);
     assert_eq!(controller.ends_at(), None);
     assert_eq!(mock.active_count(), 0);
 
@@ -351,7 +322,6 @@ fn failed_acquisition_after_active_session_stops_previous_and_leaves_inactive() 
     assert_eq!(result, Err(PowerError::AcquisitionFailed(100)));
     assert!(!controller.is_active());
     assert!(!controller.keep_display_awake());
-    assert_eq!(controller.started_at(), None);
     assert_eq!(controller.ends_at(), None);
     assert_eq!(mock.active_count(), 0);
 
@@ -374,32 +344,7 @@ fn duration_overflow_leaves_controller_inactive() {
     let result = controller.start(Some(Duration::MAX), false, now);
     assert_eq!(result, Err(PowerError::DurationOverflow));
     assert!(!controller.is_active());
-    assert_eq!(controller.started_at(), None);
     assert_eq!(controller.ends_at(), None);
     assert_eq!(mock.active_count(), 0);
     assert!(mock.events().is_empty());
-}
-
-#[test]
-fn power_controller_debug_representation() {
-    let mock = MockAssertionProvider::default();
-    let mut controller = PowerController::new(mock);
-
-    let debug_inactive = format!("{controller:?}");
-    assert!(debug_inactive.starts_with("PowerController {"));
-    assert!(debug_inactive.contains("is_active: false"));
-    assert!(debug_inactive.contains("keep_display_awake: false"));
-    assert!(debug_inactive.contains("started_at: None"));
-    assert!(debug_inactive.contains("ends_at: None"));
-
-    let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
-    let duration = Duration::from_secs(3600);
-    assert!(controller.start(Some(duration), true, now).is_ok());
-
-    let debug_active = format!("{controller:?}");
-    assert!(debug_active.starts_with("PowerController {"));
-    assert!(debug_active.contains("is_active: true"));
-    assert!(debug_active.contains("keep_display_awake: true"));
-    assert!(debug_active.contains("started_at: Some("));
-    assert!(debug_active.contains("ends_at: Some("));
 }

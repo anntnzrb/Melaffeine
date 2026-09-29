@@ -1,7 +1,7 @@
 #![allow(clippy::duration_suboptimal_units)]
 use std::time::Duration;
 
-use app_core::{DurationUnit, format_compact_duration, parse_duration};
+use app_core::{DurationUnit, format_compact_duration, parse_duration, parse_duration_spec};
 
 const ALL_UNITS: [DurationUnit; 4] = [
     DurationUnit::Seconds,
@@ -189,6 +189,38 @@ fn format_compact_duration_cases() {
             format_compact_duration(input),
             expected,
             "unexpected format for {input:?}"
+        );
+    }
+}
+
+#[test]
+fn test_parse_duration_spec() {
+    let cases = [
+        ("30s", Some(30)),
+        ("30S", Some(30)),
+        ("15m", Some(900)),
+        ("15M", Some(900)),
+        ("2h", Some(7200)),
+        ("2H", Some(7200)),
+        ("1d", Some(86_400)),
+        ("1D", Some(86_400)),
+        ("10", Some(600)),
+        ("", None),
+        ("0s", None),
+        ("0m", None),
+        ("0h", None),
+        ("0d", None),
+        ("31536001s", None),
+        ("+30s", None),
+        ("+30m", None),
+        ("invalid", None),
+    ];
+
+    for (spec, expected_secs) in cases {
+        assert_eq!(
+            parse_duration_spec(spec),
+            expected_secs.map(Duration::from_secs),
+            "unexpected result for spec {spec:?}"
         );
     }
 }

@@ -1,13 +1,18 @@
 //! Shared IPC command protocol and socket path definitions for Melaffeine.
 
 use std::fmt;
-use std::path::PathBuf;
+use std::io::{self, BufRead, BufReader, Read, Write};
+use std::os::unix::net::UnixStream;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::duration::{DurationUnit, MAX_FINITE_DURATION_SECONDS, parse_duration};
+use crate::duration::{MAX_FINITE_DURATION_SECONDS, parse_duration_spec};
 
 /// Default socket filename prefix.
 pub const SOCKET_NAME_PREFIX: &str = "melaffeine";
+
+/// Maximum number of bytes allowed in one newline-terminated IPC frame.
+pub const MAX_FRAME_BYTES: usize = 4_096;
 
 /// Computes the default Unix Domain Socket path for the current user.
 #[must_use]
@@ -16,6 +21,31 @@ pub fn socket_path() -> PathBuf {
         "{SOCKET_NAME_PREFIX}-{}.sock",
         rustix::process::geteuid().as_raw()
     ))
+}
+
+/// Sends a command to the Melaffeine IPC socket at `path` and parses the single-line response.
+pub fn send_command(
+    path: &Path,
+    command: &IpcCommand,
+    timeout: Duration,
+) -> io::Result<IpcResponse> {
+    let mut stream = UnixStream::connect(path)?;
+    stream.set_read_timeout(Some(timeout))?;
+    stream.set_write_timeout(Some(timeout))?;
+    stream.write_all(command.serialize().as_bytes())?;
+
+    let limit = u64::try_from(MAX_FRAME_BYTES.saturating_add(1)).unwrap_or(u64::MAX);
+    let mut line = String::new();
+    BufReader::new(stream.take(limit)).read_line(&mut line)?;
+    if line.len() > MAX_FRAME_BYTES || !line.ends_with('\n') {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid IPC response frame",
+        ));
+    }
+
+    IpcResponse::parse(&line)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid IPC response"))
 }
 
 /// Commands sent from the CLI client to the running application.
@@ -72,7 +102,6 @@ impl IpcCommand {
 
     /// Parses an incoming protocol line into an `IpcCommand`.
     #[must_use]
-    #[allow(clippy::option_if_let_else, clippy::question_mark)]
     pub fn parse(line: &str) -> Option<Self> {
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -88,32 +117,24 @@ impl IpcCommand {
             "STATUS" if parts.next().is_none() => Some(Self::Status),
             "QUIT" if parts.next().is_none() => Some(Self::Quit),
             "START" => {
-                let mut duration: Option<Duration> = None;
-                let mut duration_seen = false;
-                let mut keep_display_awake = false;
-
-                for part in parts {
-                    if part.eq_ignore_ascii_case("display") {
-                        if keep_display_awake {
-                            return None;
-                        }
-                        keep_display_awake = true;
-                    } else if part.eq_ignore_ascii_case("indefinite") {
-                        if duration_seen {
-                            return None;
-                        }
-                        duration_seen = true;
-                    } else if let Some(parsed) = parse_duration_spec(part) {
-                        if duration_seen {
-                            return None;
-                        }
-                        duration_seen = true;
-                        duration = Some(parsed);
-                    } else {
-                        return None;
+                let (duration, next) = match parts.next() {
+                    None => (None, None),
+                    Some(tok) if tok.eq_ignore_ascii_case("display") => {
+                        return parts.next().is_none().then_some(Self::Start {
+                            duration: None,
+                            keep_display_awake: true,
+                        });
                     }
-                }
-
+                    Some(tok) if tok.eq_ignore_ascii_case("indefinite") => (None, parts.next()),
+                    Some(tok) => (Some(parse_duration_spec(tok)?), parts.next()),
+                };
+                let keep_display_awake = match next {
+                    None => false,
+                    Some(tok) if tok.eq_ignore_ascii_case("display") && parts.next().is_none() => {
+                        true
+                    }
+                    Some(_) => return None,
+                };
                 Some(Self::Start {
                     duration,
                     keep_display_awake,
@@ -124,23 +145,13 @@ impl IpcCommand {
     }
 }
 
-/// Helper to parse duration string with flexible suffixes (`m`, `h`, `d`, `s` or bare minutes).
-#[must_use]
-pub fn parse_duration_spec(spec: &str) -> Option<Duration> {
-    let trimmed = spec.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    let (num, unit) = match trimmed.chars().last() {
-        Some('s' | 'S') => (trimmed.strip_suffix(['s', 'S'])?, DurationUnit::Seconds),
-        Some('m' | 'M') => (trimmed.strip_suffix(['m', 'M'])?, DurationUnit::Minutes),
-        Some('h' | 'H') => (trimmed.strip_suffix(['h', 'H'])?, DurationUnit::Hours),
-        Some('d' | 'D') => (trimmed.strip_suffix(['d', 'D'])?, DurationUnit::Days),
-        _ => (trimmed, DurationUnit::Minutes),
-    };
-
-    parse_duration(num, unit)
+/// Active session status details returned by `STATUS`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionStatus {
+    /// Whether display sleep is also being prevented.
+    pub keep_display_awake: bool,
+    /// Compact remaining duration text for finite sessions, or `None` for indefinite sessions.
+    pub remaining_compact: Option<String>,
 }
 
 /// Structured response sent from the application back to the CLI.
@@ -148,13 +159,8 @@ pub fn parse_duration_spec(spec: &str) -> Option<Duration> {
 pub enum IpcResponse {
     /// Generic success message.
     Ok(String),
-    /// Detailed status snapshot.
-    Status {
-        is_active: bool,
-        keep_display_awake: bool,
-        ends_at_unix: Option<u64>,
-        remaining_compact: Option<String>,
-    },
+    /// Detailed status snapshot (`None` when inactive).
+    Status(Option<SessionStatus>),
     /// Error message.
     Err(String),
 }
@@ -166,19 +172,19 @@ impl IpcResponse {
         match self {
             Self::Ok(msg) => format!("OK {msg}\n"),
             Self::Err(msg) => format!("ERR {msg}\n"),
-            Self::Status {
-                is_active,
+            Self::Status(None) => String::from("STATUS inactive\n"),
+            Self::Status(Some(SessionStatus {
                 keep_display_awake,
-                ends_at_unix,
                 remaining_compact,
-            } => {
-                let ends_str = ends_at_unix.map_or_else(|| String::from("none"), |u| u.to_string());
-                let rem_str = remaining_compact
-                    .as_deref()
-                    .unwrap_or("none")
-                    .replace(' ', "_");
-                format!(
-                    "STATUS active={is_active} display={keep_display_awake} ends_at={ends_str} remaining={rem_str}\n"
+            })) => {
+                let display = if *keep_display_awake {
+                    "display"
+                } else {
+                    "nodisplay"
+                };
+                remaining_compact.as_deref().map_or_else(
+                    || format!("STATUS active {display}\n"),
+                    |remaining| format!("STATUS active {display} {remaining}\n"),
                 )
             }
         }
@@ -186,16 +192,8 @@ impl IpcResponse {
 
     /// Parses an incoming protocol line into an `IpcResponse`.
     #[must_use]
-    #[allow(
-        clippy::option_if_let_else,
-        clippy::collapsible_if,
-        clippy::question_mark
-    )]
+    #[allow(clippy::option_if_let_else)]
     pub fn parse(line: &str) -> Option<Self> {
-        fn set_once<T>(slot: &mut Option<T>, value: T) -> Option<()> {
-            slot.is_none().then(|| *slot = Some(value))
-        }
-
         let trimmed = line.trim();
         if let Some(rest) = trimmed.strip_prefix("OK ") {
             Some(Self::Ok(rest.to_string()))
@@ -205,42 +203,28 @@ impl IpcResponse {
             Some(Self::Ok(String::new()))
         } else if trimmed == "ERR" {
             Some(Self::Err(String::new()))
-        } else if let Some(rest) = trimmed.strip_prefix("STATUS ") {
-            let mut is_active: Option<bool> = None;
-            let mut keep_display_awake: Option<bool> = None;
-            let mut ends_at_unix: Option<Option<u64>> = None;
-            let mut remaining_compact: Option<Option<String>> = None;
-
-            for part in rest.split_whitespace() {
-                if let Some(value) = part.strip_prefix("active=") {
-                    set_once(&mut is_active, value.parse::<bool>().ok()?)?;
-                } else if let Some(value) = part.strip_prefix("display=") {
-                    set_once(&mut keep_display_awake, value.parse::<bool>().ok()?)?;
-                } else if let Some(value) = part.strip_prefix("ends_at=") {
-                    let value = if value == "none" {
-                        None
-                    } else {
-                        Some(value.parse::<u64>().ok()?)
-                    };
-                    set_once(&mut ends_at_unix, value)?;
-                } else if let Some(value) = part.strip_prefix("remaining=") {
-                    let value = if value == "none" {
-                        None
-                    } else {
-                        Some(value.replace('_', " "))
-                    };
-                    set_once(&mut remaining_compact, value)?;
-                } else {
-                    return None;
+        } else if trimmed == "STATUS inactive" {
+            Some(Self::Status(None))
+        } else if let Some(active_rest) = trimmed.strip_prefix("STATUS active ") {
+            let (display_tok, remaining_compact) = match active_rest.split_once(' ') {
+                Some((display_tok, rem)) => {
+                    let rem = rem.trim();
+                    if rem.is_empty() {
+                        return None;
+                    }
+                    (display_tok, Some(rem.to_string()))
                 }
-            }
-
-            Some(Self::Status {
-                is_active: is_active?,
-                keep_display_awake: keep_display_awake?,
-                ends_at_unix: ends_at_unix?,
-                remaining_compact: remaining_compact?,
-            })
+                None => (active_rest, None),
+            };
+            let keep_display_awake = match display_tok {
+                "display" => true,
+                "nodisplay" => false,
+                _ => return None,
+            };
+            Some(Self::Status(Some(SessionStatus {
+                keep_display_awake,
+                remaining_compact,
+            })))
         } else {
             None
         }
@@ -252,24 +236,19 @@ impl fmt::Display for IpcResponse {
         match self {
             Self::Ok(msg) => write!(f, "{msg}"),
             Self::Err(msg) => write!(f, "Error: {msg}"),
-            Self::Status {
-                is_active,
+            Self::Status(Some(SessionStatus {
                 keep_display_awake,
-                ends_at_unix: _,
                 remaining_compact,
-            } => {
-                if *is_active {
-                    let rem = remaining_compact.as_deref().unwrap_or("active");
-                    let disp = if *keep_display_awake {
-                        " (display awake)"
-                    } else {
-                        ""
-                    };
-                    write!(f, "Melaffeine: ACTIVE [{rem}]{disp}")
+            })) => {
+                let rem = remaining_compact.as_deref().unwrap_or("active");
+                let disp = if *keep_display_awake {
+                    " (display awake)"
                 } else {
-                    write!(f, "Melaffeine: INACTIVE")
-                }
+                    ""
+                };
+                write!(f, "Melaffeine: ACTIVE [{rem}]{disp}")
             }
+            Self::Status(None) => write!(f, "Melaffeine: INACTIVE"),
         }
     }
 }

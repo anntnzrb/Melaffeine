@@ -38,17 +38,6 @@ impl fmt::Display for PowerError {
 
 impl Error for PowerError {}
 
-impl PowerError {
-    /// Returns the underlying error code if available.
-    #[must_use]
-    pub const fn code(&self) -> Option<i32> {
-        match self {
-            Self::AcquisitionFailed(code) => Some(*code),
-            Self::DurationOverflow => None,
-        }
-    }
-}
-
 /// Abstract provider capable of acquiring power assertions.
 pub trait AssertionProvider {
     /// RAII handle representing an acquired assertion.
@@ -65,7 +54,6 @@ pub trait AssertionProvider {
 struct ActiveSession<H> {
     _handle: H,
     kind: AssertionKind,
-    started_at: SystemTime,
     ends_at: Option<SystemTime>,
 }
 
@@ -80,7 +68,6 @@ impl<P: AssertionProvider> fmt::Debug for PowerController<P> {
         f.debug_struct("PowerController")
             .field("is_active", &self.is_active())
             .field("keep_display_awake", &self.keep_display_awake())
-            .field("started_at", &self.started_at())
             .field("ends_at", &self.ends_at())
             .finish()
     }
@@ -108,12 +95,6 @@ impl<P: AssertionProvider> PowerController<P> {
         self.session
             .as_ref()
             .is_some_and(|session| session.kind == AssertionKind::PreventDisplaySleep)
-    }
-
-    /// Returns the timestamp when the current session was started, if active.
-    #[must_use]
-    pub fn started_at(&self) -> Option<SystemTime> {
-        self.session.as_ref().map(|s| s.started_at)
     }
 
     /// Returns the timestamp when the current session will end, if finite and active.
@@ -151,7 +132,6 @@ impl<P: AssertionProvider> PowerController<P> {
         self.session = Some(ActiveSession {
             _handle: handle,
             kind,
-            started_at: now,
             ends_at,
         });
         Ok(())

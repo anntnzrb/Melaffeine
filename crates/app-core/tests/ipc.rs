@@ -1,71 +1,15 @@
 #![allow(clippy::duration_suboptimal_units, clippy::panic_in_result_fn)]
 
-use std::process::Command;
+use std::path::PathBuf;
 use std::time::Duration;
 
-use app_core::ipc::{IpcCommand, IpcResponse, parse_duration_spec, socket_path};
+use app_core::ipc::{IpcCommand, IpcResponse, SessionStatus, socket_path};
 use rustix::process::geteuid;
 
 #[test]
-fn socket_path_uses_os_identity() -> Result<(), Box<dyn std::error::Error>> {
-    let expected = format!("/tmp/melaffeine-{}.sock", geteuid().as_raw());
-    assert_eq!(socket_path().to_string_lossy().into_owned(), expected);
-
-    let executable = std::env::current_exe()?;
-    let output = Command::new(executable)
-        .args(["--exact", "socket_path_reports_child_value", "--nocapture"])
-        .env("UID", "not-the-effective-uid")
-        .env("USER", "not-the-current-user")
-        .env("TMPDIR", "/var/tmp")
-        .output()?;
-    assert!(
-        output.status.success(),
-        "child test process failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let child_stdout = String::from_utf8_lossy(&output.stdout);
-    let child_path = child_stdout
-        .lines()
-        .find_map(|line| line.split_once("SOCKET_PATH=").map(|(_, path)| path));
-    assert_eq!(child_path, Some(expected.as_str()));
-    Ok(())
-}
-
-#[test]
-fn socket_path_reports_child_value() {
-    println!("SOCKET_PATH={}", socket_path().display());
-}
-
-#[test]
-fn test_parse_duration_spec() {
-    let cases = [
-        ("30s", Some(30)),
-        ("30S", Some(30)),
-        ("15m", Some(900)),
-        ("15M", Some(900)),
-        ("2h", Some(7200)),
-        ("2H", Some(7200)),
-        ("1d", Some(86_400)),
-        ("1D", Some(86_400)),
-        ("10", Some(600)), // Bare number defaults to minutes
-        ("", None),
-        ("0s", None),
-        ("0m", None),
-        ("0h", None),
-        ("0d", None),
-        ("31536001s", None),
-        ("+30s", None),
-        ("+30m", None),
-        ("invalid", None),
-    ];
-
-    for (spec, expected_secs) in cases {
-        assert_eq!(
-            parse_duration_spec(spec),
-            expected_secs.map(Duration::from_secs),
-            "unexpected result for spec {spec:?}"
-        );
-    }
+fn socket_path_uses_os_identity() {
+    let expected = PathBuf::from(format!("/tmp/melaffeine-{}.sock", geteuid().as_raw()));
+    assert_eq!(socket_path(), expected);
 }
 
 #[test]
@@ -92,6 +36,13 @@ fn test_ipc_command_serialize_and_parse() {
             },
             "START indefinite\n",
         ),
+        (
+            IpcCommand::Start {
+                duration: None,
+                keep_display_awake: true,
+            },
+            "START indefinite display\n",
+        ),
         (IpcCommand::Stop, "STOP\n"),
         (IpcCommand::Toggle, "TOGGLE\n"),
         (IpcCommand::Status, "STATUS\n"),
@@ -107,15 +58,31 @@ fn test_ipc_command_serialize_and_parse() {
         );
     }
 
-    // Case-insensitive parse-only forms
+    // Case-insensitive and shorthand parse-only forms
     for (line, expected) in [
         ("stop\n", IpcCommand::Stop),
         ("status\n", IpcCommand::Status),
+        (
+            "START\n",
+            IpcCommand::Start {
+                duration: None,
+                keep_display_awake: false,
+            },
+        ),
+        (
+            "START display\n",
+            IpcCommand::Start {
+                duration: None,
+                keep_display_awake: true,
+            },
+        ),
     ] {
         assert_eq!(IpcCommand::parse(line), Some(expected));
     }
 
     for line in [
+        "",
+        "   \n",
         "START invalid\n",
         "STOP 1h\n",
         "TOGGLE typo\n",
@@ -125,6 +92,9 @@ fn test_ipc_command_serialize_and_parse() {
         "START indefinite 1h\n",
         "START 1h 2h\n",
         "START display display\n",
+        "START display 2h\n",
+        "START display indefinite\n",
+        "START 1h display extra\n",
     ] {
         assert_eq!(IpcCommand::parse(line), None, "expected {line:?} rejected");
     }
@@ -147,33 +117,40 @@ fn test_ipc_response_serialize_parse_display() {
         (IpcResponse::Ok(String::new()), "OK \n", ""),
         (IpcResponse::Err(String::new()), "ERR \n", "Error: "),
         (
-            IpcResponse::Status {
-                is_active: true,
+            IpcResponse::Status(Some(SessionStatus {
                 keep_display_awake: true,
-                ends_at_unix: Some(1_724_850_000),
                 remaining_compact: Some(String::from("1h 30m")),
-            },
-            "STATUS active=true display=true ends_at=1724850000 remaining=1h_30m\n",
+            })),
+            "STATUS active display 1h 30m\n",
             "Melaffeine: ACTIVE [1h 30m] (display awake)",
         ),
         (
-            IpcResponse::Status {
-                is_active: true,
+            IpcResponse::Status(Some(SessionStatus {
                 keep_display_awake: false,
-                ends_at_unix: None,
+                remaining_compact: Some(String::from("45m")),
+            })),
+            "STATUS active nodisplay 45m\n",
+            "Melaffeine: ACTIVE [45m]",
+        ),
+        (
+            IpcResponse::Status(Some(SessionStatus {
+                keep_display_awake: true,
                 remaining_compact: None,
-            },
-            "STATUS active=true display=false ends_at=none remaining=none\n",
+            })),
+            "STATUS active display\n",
+            "Melaffeine: ACTIVE [active] (display awake)",
+        ),
+        (
+            IpcResponse::Status(Some(SessionStatus {
+                keep_display_awake: false,
+                remaining_compact: None,
+            })),
+            "STATUS active nodisplay\n",
             "Melaffeine: ACTIVE [active]",
         ),
         (
-            IpcResponse::Status {
-                is_active: false,
-                keep_display_awake: false,
-                ends_at_unix: None,
-                remaining_compact: None,
-            },
-            "STATUS active=false display=false ends_at=none remaining=none\n",
+            IpcResponse::Status(None),
+            "STATUS inactive\n",
             "Melaffeine: INACTIVE",
         ),
     ];
@@ -198,22 +175,15 @@ fn test_ipc_response_serialize_parse_display() {
         // Token boundaries: bare prefixes without separator are rejected
         "OKAY",
         "ERROR",
-        // Invalid field values
-        "STATUS active=invalid display=false ends_at=123 remaining=1h_30m",
-        "STATUS active=true display=invalid ends_at=123 remaining=1h_30m",
-        "STATUS active=true display=false ends_at=notanumber remaining=none",
-        // Missing required status fields
-        "STATUS display=false ends_at=123 remaining=1h_30m",
-        "STATUS active=true ends_at=123 remaining=1h_30m",
-        "STATUS active=true display=false remaining=1h_30m",
-        "STATUS active=true display=false ends_at=123",
-        // Duplicate status fields
-        "STATUS active=true active=false display=false ends_at=123 remaining=none",
-        "STATUS active=true display=false display=true ends_at=123 remaining=none",
-        "STATUS active=true display=false ends_at=123 ends_at=456 remaining=none",
-        "STATUS active=true display=false ends_at=123 remaining=none remaining=1h",
-        // Unknown field
-        "STATUS active=true display=false ends_at=123 remaining=none unexpected=value",
+        // Malformed status lines
+        "STATUS",
+        "STATUS active",
+        "STATUS active maybe",
+        "STATUS active maybe 1h 30m",
+        "STATUS inactive display",
+        "STATUS inactive nodisplay",
+        "STATUS inactive 1h 30m",
+        "STATUS unknown",
     ] {
         assert_eq!(IpcResponse::parse(line), None, "expected {line:?} rejected");
     }

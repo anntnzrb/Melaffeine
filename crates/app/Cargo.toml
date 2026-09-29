@@ -15,11 +15,12 @@ path = "src/main.rs"
 app-core.workspace = true
 objc2.workspace = true
 block2.workspace = true
+dispatch2.workspace = true
 objc2-foundation = { workspace = true, features = [
     "NSArray",
     "NSDate",
     "NSDateFormatter",
-    "NSError",
+    "NSRunLoop",
     "NSString",
     "NSTimer",
     "block2",
@@ -27,7 +28,6 @@ objc2-foundation = { workspace = true, features = [
 objc2-app-kit = { workspace = true, features = [
     "NSApplication",
     "NSButton",
-    "NSCell",
     "NSColor",
     "NSControl",
     "NSEvent",

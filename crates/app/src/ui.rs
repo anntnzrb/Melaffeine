@@ -53,24 +53,18 @@ pub const UNIT_DAYS_INDEX: isize = 2;
 
 /// A projection representing the state of all UI elements in the popover.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(clippy::struct_excessive_bools)]
 pub struct UiProjection {
     /// Title of the start/stop button ("Start" or "Stop").
     pub start_stop_title: &'static str,
     /// SF Symbol icon name for the status item ("cup.and.saucer" or "cup.and.saucer.fill").
     pub status_icon: &'static str,
-    /// Whether the duration input field is enabled.
+    /// Whether checkboxes (indefinite, keep display awake) are enabled.
+    pub inputs_enabled: bool,
+    /// Whether duration input (field and unit popup) is enabled.
     pub duration_enabled: bool,
-    /// Whether the duration unit popup button is enabled.
-    pub unit_enabled: bool,
-    /// Whether the "Keep display awake too" checkbox is enabled.
-    pub display_enabled: bool,
-    /// Whether the "Run indefinitely" checkbox is enabled.
-    pub indefinite_enabled: bool,
     /// Optional formatted countdown text if an active finite session is running.
     pub countdown_text: Option<String>,
 }
-
 /// Computes the declarative UI projection given the power controller state,
 /// indefinite checkbox state, and optional formatted countdown text.
 #[must_use]
@@ -83,20 +77,16 @@ pub fn compute_ui_projection(
         UiProjection {
             start_stop_title: TITLE_STOP,
             status_icon: ICON_ACTIVE,
+            inputs_enabled: false,
             duration_enabled: false,
-            unit_enabled: false,
-            display_enabled: false,
-            indefinite_enabled: false,
-            countdown_text: if indefinite { None } else { countdown_text },
+            countdown_text,
         }
     } else {
         UiProjection {
             start_stop_title: TITLE_START,
             status_icon: ICON_INACTIVE,
+            inputs_enabled: true,
             duration_enabled: !indefinite,
-            unit_enabled: !indefinite,
-            display_enabled: true,
-            indefinite_enabled: true,
             countdown_text: None,
         }
     }

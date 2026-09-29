@@ -1,14 +1,13 @@
 use std::time::Duration;
 
-pub const MIN_DURATION_VALUE: u64 = 1;
-pub const MAX_FINITE_DURATION_DAYS: u64 = 365;
-pub const SECONDS_PER_MINUTE: u64 = 60;
-pub const SECONDS_PER_HOUR: u64 = 3600;
-pub const SECONDS_PER_DAY: u64 = 86400;
+const MIN_DURATION_VALUE: u64 = 1;
+const SECONDS_PER_MINUTE: u64 = 60;
+const SECONDS_PER_HOUR: u64 = 3600;
+const SECONDS_PER_DAY: u64 = 86400;
 pub const MAX_FINITE_DURATION_SECONDS: u64 = 31_536_000;
-pub const MINUTES_PER_DAY: u64 = 1440;
-pub const MINUTES_PER_HOUR: u64 = 60;
-pub const HOURS_PER_DAY: u64 = 24;
+const MINUTES_PER_DAY: u64 = 1440;
+const MINUTES_PER_HOUR: u64 = 60;
+const HOURS_PER_DAY: u64 = 24;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DurationUnit {
@@ -68,4 +67,23 @@ pub fn format_compact_duration(remaining: Duration) -> String {
             format!("{minutes}m")
         }
     }
+}
+
+/// Helper to parse duration string with flexible suffixes (`m`, `h`, `d`, `s` or bare minutes).
+#[must_use]
+pub fn parse_duration_spec(spec: &str) -> Option<Duration> {
+    let trimmed = spec.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let (num, unit) = match trimmed.chars().last() {
+        Some('s' | 'S') => (trimmed.strip_suffix(['s', 'S'])?, DurationUnit::Seconds),
+        Some('m' | 'M') => (trimmed.strip_suffix(['m', 'M'])?, DurationUnit::Minutes),
+        Some('h' | 'H') => (trimmed.strip_suffix(['h', 'H'])?, DurationUnit::Hours),
+        Some('d' | 'D') => (trimmed.strip_suffix(['d', 'D'])?, DurationUnit::Days),
+        _ => (trimmed, DurationUnit::Minutes),
+    };
+
+    parse_duration(num, unit)
 }

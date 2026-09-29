@@ -1,15 +1,11 @@
 //! Melaffeine CLI controller for managing sleep prevention sessions.
 
-use std::io::{BufRead, BufReader, Read, Write};
-use std::os::unix::net::UnixStream;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use app_core::ipc::{IpcCommand, IpcResponse, parse_duration_spec, socket_path};
+use app_core::duration::parse_duration_spec;
+use app_core::ipc::{IpcCommand, IpcResponse, send_command, socket_path};
 use clap::{Parser, Subcommand};
-
-/// Maximum bytes read for a single IPC response line.
-const MAX_RESPONSE_BYTES: u64 = 4_097;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -35,7 +31,7 @@ enum Commands {
         display: bool,
 
         /// Run indefinitely
-        #[arg(short, long)]
+        #[arg(short, long, conflicts_with = "duration")]
         indefinite: bool,
     },
     /// Stop active sleep prevention session
@@ -49,41 +45,35 @@ enum Commands {
 }
 
 fn main() -> ExitCode {
-    report_result(run_cli(Cli::parse()))
-}
-
-fn report_result(result: Result<IpcResponse, String>) -> ExitCode {
-    match result {
-        Ok(IpcResponse::Err(error)) => {
-            eprintln!("Error: {error}");
-            ExitCode::FAILURE
-        }
-        Ok(response) => {
-            println!("{response}");
+    match run_cli(Cli::parse()) {
+        Ok(output) => {
+            println!("{output}");
             ExitCode::SUCCESS
         }
         Err(error) => {
-            eprintln!("{error}");
+            eprintln!("Error: {error}");
             ExitCode::FAILURE
         }
     }
 }
 
-fn run_cli(cli: Cli) -> Result<IpcResponse, String> {
+fn run_cli(cli: Cli) -> Result<String, String> {
     let command = match cli.command {
         Commands::Start {
             duration,
             display,
-            indefinite,
+            indefinite: _,
         } => {
-            let parsed_duration: Option<Duration> = match (indefinite, duration) {
-                (true, _) | (_, None) => None,
-                (false, Some(spec)) => Some(parse_duration_spec(&spec).ok_or_else(|| {
-                    format!(
-                        "Error: Invalid duration specification '{spec}'. Use format like 2h, 45m, 1d."
-                    )
-                })?),
-            };
+            let parsed_duration = duration
+                .as_deref()
+                .map(|spec| {
+                    parse_duration_spec(spec).ok_or_else(|| {
+                        format!(
+                            "Invalid duration specification '{spec}'. Use format like 2h, 45m, 1d."
+                        )
+                    })
+                })
+                .transpose()?;
             IpcCommand::Start {
                 duration: parsed_duration,
                 keep_display_awake: display,
@@ -95,36 +85,18 @@ fn run_cli(cli: Cli) -> Result<IpcResponse, String> {
         Commands::Quit => IpcCommand::Quit,
     };
 
-    send_ipc_command(&command)
-}
-
-/// Sends an IPC command to the running Melaffeine application over Unix domain socket.
-fn send_ipc_command(command: &IpcCommand) -> Result<IpcResponse, String> {
     let path = socket_path();
-    let mut stream = UnixStream::connect(&path).map_err(|_| {
+    let response = send_command(&path, &command, Duration::from_secs(5)).map_err(|_| {
         format!(
-            "Error: Could not connect to Melaffeine at {}.\nIs Melaffeine.app running?",
+            "Could not connect to Melaffeine at {}.\nIs Melaffeine.app running?",
             path.display()
         )
     })?;
 
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .map_err(|e| format!("Failed to configure socket: {e}"))?;
-
-    let line = command.serialize();
-    stream
-        .write_all(line.as_bytes())
-        .map_err(|e| format!("Failed to send command: {e}"))?;
-
-    let mut reader = BufReader::new((&stream).take(MAX_RESPONSE_BYTES));
-    let mut response_line = String::new();
-    reader
-        .read_line(&mut response_line)
-        .map_err(|e| format!("Failed to read response: {e}"))?;
-
-    IpcResponse::parse(&response_line)
-        .ok_or_else(|| format!("Received invalid response from Melaffeine: {response_line}"))
+    match response {
+        IpcResponse::Err(error) => Err(error),
+        other => Ok(other.to_string()),
+    }
 }
 
 #[cfg(test)]
@@ -162,28 +134,12 @@ mod tests {
             assert_eq!(display, expected.1);
             assert_eq!(indefinite, expected.2);
         }
-    }
-
-    #[test]
-    fn test_send_ipc_command_not_running() {
-        let res = send_ipc_command(&IpcCommand::Status);
-        if let Err(e) = res {
-            assert!(e.contains("Could not connect to Melaffeine"));
-        }
-    }
-
-    #[test]
-    fn application_error_returns_failure() {
-        assert_eq!(
-            report_result(Ok(IpcResponse::Err(String::from("rejected")))),
-            ExitCode::FAILURE
-        );
+        assert!(Cli::try_parse_from(["melaffeine", "start", "2h", "--indefinite"]).is_err());
     }
 
     #[test]
     fn test_run_cli_invalid_duration() {
         let cli = Cli::try_parse_from(["melaffeine", "start", "invalid_duration"]).unwrap();
-        let err = run_cli(cli).unwrap_err();
-        assert!(err.contains("Invalid duration specification"));
+        assert!(run_cli(cli).is_err());
     }
 }

@@ -10,22 +10,21 @@
     dead_code
 )]
 
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use app::app_delegate::AppDelegate;
 use app::ui::{
     DEFAULT_DURATION_TEXT, ERROR_DURATION_INVALID, TITLE_KEEP_DISPLAY_AWAKE,
-    TITLE_RUN_INDEFINITELY, TITLE_START, UNIT_DAYS_INDEX, UNIT_HOURS_INDEX, UNIT_MINUTES_INDEX,
-    build_content_view,
+    TITLE_RUN_INDEFINITELY, TITLE_START, TITLE_STOP, UNIT_DAYS_INDEX, UNIT_HOURS_INDEX,
+    UNIT_MINUTES_INDEX, build_content_view,
 };
-use app_core::ipc::{IpcCommand, IpcResponse};
+use app_core::ipc::{IpcCommand, IpcResponse, SessionStatus};
 use objc2::runtime::ProtocolObject;
 use objc2::{DefinedClass, MainThreadMarker, msg_send};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSControlStateValueOff, NSControlStateValueOn,
 };
-use objc2_foundation::{NSNotification, NSString, NSTimer};
-
+use objc2_foundation::{NSDate, NSNotification, NSRunLoop, NSString};
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|arg| arg == "--list") {
@@ -77,38 +76,39 @@ fn main() {
     // Inspect ivars
     let state_opt = delegate.ivars().borrow();
     let state = state_opt.as_ref().expect("AppState must be initialized");
-    let duration_field = state.duration_field.clone();
-    let indefinite_button = state.indefinite_button.clone();
-    let display_awake_button = state.display_awake_button.clone();
-    let unit_popup = state.unit_popup.clone();
-    let start_stop_button = state.start_stop_button.clone();
+    let duration_field = state.controls.duration_field.clone();
+    let indefinite_button = state.controls.indefinite_button.clone();
+    let display_awake_button = state.controls.keep_display_awake_button.clone();
+    let unit_popup = state.controls.unit_popup.clone();
+    let start_stop_button = state.controls.start_stop_button.clone();
     let status_item = state.status_item.clone();
-    let time_label = state.time_label.clone();
-    let error_label = state.error_label.clone();
+    let time_label = state.controls.time_label.clone();
+    let error_label = state.controls.error_label.clone();
     drop(state_opt);
 
-    // UI sync and error display
-    delegate.update_ui();
+    // Validation error display and persistence across update_ui
     delegate.show_error("Test Error Message");
+    assert_eq!(error_label.stringValue().to_string(), "Test Error Message");
+    assert!(!error_label.isHidden());
     delegate.update_ui();
-    assert_eq!(error_label.stringValue().to_string(), "");
-    assert!(error_label.isHidden());
+    assert_eq!(error_label.stringValue().to_string(), "Test Error Message");
+    assert!(!error_label.isHidden());
 
-    // Action handler: controlChanged
+    // Action handler: controlChanged clears error
     unsafe {
         let _: () = msg_send![&*delegate, controlChanged: &*duration_field];
     }
+    assert_eq!(error_label.stringValue().to_string(), "");
+    assert!(error_label.isHidden());
 
     // Finite session start / stop (minutes)
     duration_field.setStringValue(&NSString::from_str("15"));
     unit_popup.selectItemAtIndex(UNIT_MINUTES_INDEX);
-    unsafe {
-        let _: () = msg_send![&*delegate, startStopClicked: &*start_stop_button];
-    }
+    assert_eq!(delegate.handle_start_stop(), Ok(true));
     assert_eq!(error_label.stringValue().to_string(), "");
     assert!(error_label.isHidden());
     assert!(!time_label.isHidden());
-    delegate.update_ui();
+    assert_eq!(start_stop_button.title().to_string(), TITLE_STOP);
 
     let future_end = SystemTime::now() + Duration::from_secs(900);
     let countdown_res = delegate.format_countdown(Some(future_end));
@@ -118,34 +118,27 @@ fn main() {
         .unwrap();
     assert!(delegate.format_countdown(Some(past_end)).is_none());
     assert!(delegate.format_countdown(None).is_none());
-    delegate.show_error("stale active error");
-    delegate.update_ui();
-    assert_eq!(error_label.stringValue().to_string(), "");
-    assert!(error_label.isHidden());
 
     // Stop session
-    unsafe {
-        let _: () = msg_send![&*delegate, startStopClicked: &*start_stop_button];
-    }
-    delegate.update_ui();
+    assert_eq!(delegate.handle_start_stop(), Ok(false));
+    assert_eq!(start_stop_button.title().to_string(), TITLE_START);
 
     // Indefinite session start / stop with display awake
     indefinite_button.setState(NSControlStateValueOn);
     display_awake_button.setState(NSControlStateValueOn);
-    unsafe {
-        let _: () = msg_send![&*delegate, startStopClicked: &*start_stop_button];
-    }
-    delegate.update_ui();
-    unsafe {
-        let _: () = msg_send![&*delegate, startStopClicked: &*start_stop_button];
-    }
+    assert_eq!(delegate.handle_start_stop(), Ok(true));
+    assert_eq!(start_stop_button.title().to_string(), TITLE_STOP);
+    assert_eq!(delegate.handle_start_stop(), Ok(false));
+    assert_eq!(start_stop_button.title().to_string(), TITLE_START);
 
     // Invalid input error path
     indefinite_button.setState(NSControlStateValueOff);
     duration_field.setStringValue(&NSString::from_str("invalid_number"));
-    unsafe {
-        let _: () = msg_send![&*delegate, startStopClicked: &*start_stop_button];
-    }
+    assert_eq!(
+        delegate.handle_start_stop(),
+        Err(String::from(ERROR_DURATION_INVALID))
+    );
+    delegate.show_error(ERROR_DURATION_INVALID);
     assert_eq!(
         error_label.stringValue().to_string(),
         ERROR_DURATION_INVALID
@@ -155,15 +148,15 @@ fn main() {
     // Hours and Days units
     duration_field.setStringValue(&NSString::from_str("3"));
     unit_popup.selectItemAtIndex(UNIT_HOURS_INDEX);
-    assert!(delegate.handle_start_stop().is_ok());
+    assert_eq!(delegate.handle_start_stop(), Ok(true));
     assert_eq!(error_label.stringValue().to_string(), "");
     assert!(error_label.isHidden());
-    delegate.stop_power_and_expiry();
+    delegate.stop_session();
 
     duration_field.setStringValue(&NSString::from_str("2"));
     unit_popup.selectItemAtIndex(UNIT_DAYS_INDEX);
-    assert!(delegate.handle_start_stop().is_ok());
-    delegate.stop_power_and_expiry();
+    assert_eq!(delegate.handle_start_stop(), Ok(true));
+    delegate.stop_session();
 
     // Popover toggle
     if let Some(button) = status_item.button(mtm) {
@@ -171,28 +164,20 @@ fn main() {
 
         duration_field.setStringValue(&NSString::from_str("10"));
         unit_popup.selectItemAtIndex(UNIT_MINUTES_INDEX);
-        unsafe {
-            let _: () = msg_send![&*delegate, startStopClicked: &*start_stop_button];
-        }
-        delegate.update_ui();
+        assert_eq!(delegate.handle_start_stop(), Ok(true));
+        assert_eq!(start_stop_button.title().to_string(), TITLE_STOP);
 
         delegate.toggle_popover_relative_to(&button);
         delegate.close_popover();
+        delegate.stop_session();
     }
 
     // Outside click monitors and teardown
     delegate.install_outside_click_monitor();
     delegate.remove_outside_click_monitor();
     delegate.teardown();
-    // 3. Test IPC command execution
     let status_resp = delegate.execute_ipc_command(&IpcCommand::Status);
-    assert!(matches!(
-        status_resp,
-        IpcResponse::Status {
-            is_active: false,
-            ..
-        }
-    ));
+    assert_eq!(status_resp, IpcResponse::Status(None));
 
     // Toggle when inactive with invalid input must report the validation error.
     indefinite_button.setState(NSControlStateValueOff);
@@ -203,13 +188,7 @@ fn main() {
         IpcResponse::Err(String::from(ERROR_DURATION_INVALID))
     );
     let invalid_status = delegate.execute_ipc_command(&IpcCommand::Status);
-    assert!(matches!(
-        invalid_status,
-        IpcResponse::Status {
-            is_active: false,
-            ..
-        }
-    ));
+    assert_eq!(invalid_status, IpcResponse::Status(None));
 
     // A finite IPC start remains finite even when the editable checkbox is checked.
     indefinite_button.setState(NSControlStateValueOn);
@@ -228,38 +207,38 @@ fn main() {
     let status_resp2 = delegate.execute_ipc_command(&IpcCommand::Status);
     assert!(matches!(
         status_resp2,
-        IpcResponse::Status {
-            is_active: true,
+        IpcResponse::Status(Some(SessionStatus {
             keep_display_awake: true,
-            ends_at_unix: Some(_),
-            ..
-        }
+            remaining_compact: Some(_),
+        }))
     ));
 
-    // Current active sessions also clear stale errors.
-    delegate.show_error("stale active error");
-    delegate.update_ui();
-    assert_eq!(error_label.stringValue().to_string(), "");
-    assert!(error_label.isHidden());
-
+    // Toggle while active stops sleep prevention.
     let toggle_resp = delegate.execute_ipc_command(&IpcCommand::Toggle);
-    assert!(matches!(toggle_resp, IpcResponse::Ok(_)));
+    assert_eq!(
+        toggle_resp,
+        IpcResponse::Ok(String::from("Stopped sleep prevention"))
+    );
+    assert_eq!(
+        delegate.execute_ipc_command(&IpcCommand::Status),
+        IpcResponse::Status(None)
+    );
 
     let stop_resp = delegate.execute_ipc_command(&IpcCommand::Stop);
-    assert!(matches!(stop_resp, IpcResponse::Ok(_)));
+    assert_eq!(
+        stop_resp,
+        IpcResponse::Ok(String::from("Stopped sleep prevention"))
+    );
 
-    // A no-conflict inactive projection clears stale errors as well.
-    if app::conflicts::detect_external_conflict().is_none() {
-        delegate.show_error("stale inactive error");
-        delegate.update_ui();
-        assert_eq!(error_label.stringValue().to_string(), "");
-        assert!(error_label.isHidden());
-    }
-
-    // Toggle when inactive -> starts session
+    // Toggle when inactive with valid input starts session
+    duration_field.setStringValue(&NSString::from_str("2"));
+    unit_popup.selectItemAtIndex(UNIT_HOURS_INDEX);
     let toggle_inactive = delegate.execute_ipc_command(&IpcCommand::Toggle);
-    assert!(matches!(toggle_inactive, IpcResponse::Ok(_)));
-    delegate.stop_power_and_expiry();
+    assert_eq!(
+        toggle_inactive,
+        IpcResponse::Ok(String::from("Started sleep prevention"))
+    );
+    delegate.stop_session();
 
     // Start indefinite via IPC
     let start_indef_resp = delegate.execute_ipc_command(&IpcCommand::Start {
@@ -267,55 +246,75 @@ fn main() {
         keep_display_awake: false,
     });
     assert!(matches!(start_indef_resp, IpcResponse::Ok(_)));
-    delegate.stop_power_and_expiry();
-
-    let quit_resp = delegate.execute_ipc_command(&IpcCommand::Quit);
-    assert!(matches!(quit_resp, IpcResponse::Ok(_)));
-
-    // Popover, Menu & Timer tests
+    assert_eq!(
+        delegate.execute_ipc_command(&IpcCommand::Status),
+        IpcResponse::Status(Some(SessionStatus {
+            keep_display_awake: false,
+            remaining_compact: None,
+        }))
+    );
+    delegate.stop_session();
+    // Popover toggle open and close
     if let Some(btn) = status_item.button(mtm) {
         delegate.toggle_popover_relative_to(&btn);
         delegate.toggle_popover_relative_to(&btn);
     }
-    delegate.install_outside_click_monitor();
-    delegate.remove_outside_click_monitor();
-    delegate.start_countdown_timer_if_needed();
-    // Manually install and invalidate countdown timer to cover branch
-    let test_timer = unsafe {
-        NSTimer::scheduledTimerWithTimeInterval_repeats_block(
-            10.0,
-            false,
-            &block2::RcBlock::new(|_| {}),
-        )
-    };
-    delegate
-        .ivars()
-        .borrow_mut()
-        .as_mut()
-        .unwrap()
-        .countdown_timer = Some(test_timer);
-    delegate.stop_countdown_timer();
+    delegate.close_popover();
+    // Real timer expiry via NSRunLoop
+    let start_finite = delegate.execute_ipc_command(&IpcCommand::Start {
+        duration: Some(Duration::from_secs(1)),
+        keep_display_awake: false,
+    });
+    assert!(matches!(start_finite, IpcResponse::Ok(_)));
     assert!(
         delegate
             .ivars()
             .borrow()
             .as_ref()
             .unwrap()
-            .countdown_timer
-            .is_none()
+            .power
+            .is_active()
     );
-    delegate.close_popover();
 
-    // Timer expiry via NSRunLoop
-    delegate
-        .start_session(Some(Duration::from_secs(60)), false)
-        .unwrap();
-    delegate.start_countdown_timer_if_needed();
-    delegate.stop_power_and_expiry();
+    let run_loop = NSRunLoop::currentRunLoop();
+    let start_time = Instant::now();
+    while delegate
+        .ivars()
+        .borrow()
+        .as_ref()
+        .unwrap()
+        .power
+        .is_active()
+        && start_time.elapsed() < Duration::from_secs(3)
+    {
+        let until = NSDate::dateWithTimeIntervalSinceNow(0.1);
+        run_loop.runUntilDate(&until);
+    }
 
+    let is_active = delegate
+        .ivars()
+        .borrow()
+        .as_ref()
+        .unwrap()
+        .power
+        .is_active();
+    assert!(
+        !is_active,
+        "PowerController must be inactive after expiry timer fires"
+    );
+    assert_eq!(
+        delegate.execute_ipc_command(&IpcCommand::Status),
+        IpcResponse::Status(None)
+    );
+    assert_eq!(start_stop_button.title().to_string(), TITLE_START);
     // Termination lifecycle
     unsafe {
         let _: () = msg_send![&*delegate, applicationWillTerminate: &*notif];
     }
     println!("All main thread integration tests PASSED!");
+
+    // Quit IPC command is tested last so the 0.05s termination timer does not
+    // fire during NSRunLoop processing in earlier tests.
+    let quit_resp = delegate.execute_ipc_command(&IpcCommand::Quit);
+    assert_eq!(quit_resp, IpcResponse::Ok(String::from("Terminating")));
 }
