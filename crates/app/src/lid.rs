@@ -193,6 +193,18 @@ impl DiagnosticDrain {
     }
 }
 
+fn diagnostic_read_result(result: io::Result<usize>, cancelled: bool) -> io::Result<Option<usize>> {
+    match result {
+        Ok(0) => Ok(None),
+        Ok(count) => Ok(Some(count)),
+        Err(error) if error.kind() == io::ErrorKind::Interrupted => Ok(Some(0)),
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+            Ok(if cancelled { None } else { Some(0) })
+        }
+        Err(error) => Err(error),
+    }
+}
+
 fn drain_diagnostics(mut pipe: ChildStderr, cancel: &PipeReader) -> io::Result<Vec<u8>> {
     let flags = retry_on_intr(|| fcntl_getfl(&pipe))?;
     retry_on_intr(|| fcntl_setfl(&pipe, flags | OFlags::NONBLOCK))?;
@@ -211,17 +223,10 @@ fn drain_diagnostics(mut pipe: ChildStderr, cancel: &PipeReader) -> io::Result<V
                 .revents()
                 .intersects(PollFlags::IN | PollFlags::HUP);
         }
-        let count = match pipe.read(&mut buffer) {
-            Ok(0) => return Ok(retained),
-            Ok(count) => count,
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                if cancelled {
-                    return Ok(retained);
-                }
-                continue;
-            }
-            Err(error) => return Err(error),
+        let count = match diagnostic_read_result(pipe.read(&mut buffer), cancelled)? {
+            None => return Ok(retained),
+            Some(0) => continue,
+            Some(count) => count,
         };
         // Drain all bytes, retaining only a bounded diagnostic prefix. After
         // cancellation, nonblocking reads consume only immediately available data.
@@ -521,6 +526,43 @@ fn parse_sleep_disabled(output: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn diagnostic_reads_retry_only_transient_errors() {
+        for cancelled in [false, true] {
+            assert_eq!(
+                diagnostic_read_result(Err(io::Error::from(io::ErrorKind::Interrupted)), cancelled)
+                    .expect("interrupted read must retry"),
+                Some(0),
+                "interruption must never lose diagnostics"
+            );
+            assert_eq!(
+                diagnostic_read_result(Err(io::Error::from(io::ErrorKind::WouldBlock)), cancelled)
+                    .expect("nonblocking read is not fatal"),
+                if cancelled { None } else { Some(0) },
+                "only cancellation allows an empty nonblocking pipe to finish"
+            );
+            for kind in [io::ErrorKind::PermissionDenied, io::ErrorKind::BrokenPipe] {
+                assert_eq!(
+                    diagnostic_read_result(Err(io::Error::from(kind)), cancelled)
+                        .expect_err("fatal diagnostics error must propagate")
+                        .kind(),
+                    kind,
+                    "fatal errors must not be mistaken for WouldBlock"
+                );
+            }
+            assert_eq!(
+                diagnostic_read_result(Ok(0), cancelled).expect("EOF completes drain"),
+                None,
+                "EOF must finish regardless of cancellation"
+            );
+            assert_eq!(
+                diagnostic_read_result(Ok(17), cancelled).expect("read retains bytes"),
+                Some(17),
+                "available bytes must still be retained after cancellation"
+            );
+        }
+    }
 
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
