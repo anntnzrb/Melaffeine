@@ -4,6 +4,7 @@ use std::cell::RefCell;
 use std::ptr::NonNull;
 use std::time::{Duration, SystemTime};
 
+use crate::environment::AppEnvironment;
 use crate::iokit::IOKitProvider;
 use crate::ipc_server::IpcServer;
 use crate::power::PowerController;
@@ -13,26 +14,55 @@ use crate::ui::{
     UNIT_DAYS_INDEX, UNIT_MINUTES_INDEX, build_content_view, compute_ui_projection,
 };
 use app_core::duration::{DurationUnit, format_compact_duration, parse_duration};
-use app_core::ipc::{IpcCommand, IpcResponse, SessionStatus, socket_path};
+use app_core::ipc::{IpcCommand, IpcResponse, SessionStatus};
 use block2::RcBlock;
 use objc2::encode::RefEncode;
 use objc2::rc::{Retained, Weak};
-use objc2::runtime::AnyObject;
+use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSApplication, NSApplicationDelegate, NSButton, NSControlStateValueOn, NSEvent, NSEventMask,
-    NSEventType, NSImage, NSMenu, NSMenuItem, NSPopover, NSPopoverBehavior, NSStatusBar,
-    NSStatusBarButton, NSStatusItem, NSVariableStatusItemLength, NSViewController,
+    NSEventType, NSImage, NSMenu, NSMenuItem, NSPopover, NSPopoverBehavior, NSPopoverDelegate,
+    NSStatusBar, NSStatusBarButton, NSStatusItem, NSVariableStatusItemLength, NSViewController,
 };
 use objc2_foundation::{
     NSDate, NSDateFormatter, NSDateFormatterStyle, NSNotification, NSObject, NSObjectProtocol,
-    NSRectEdge, NSSize, NSString, NSTimer,
+    NSRectEdge, NSRunLoop, NSRunLoopCommonModes, NSSize, NSString, NSTimer,
 };
 
+const ERROR_SLEEP_RESTORE_PREFIX: &str = "Couldn't restore normal sleep: ";
 const ERROR_THERMAL_TOO_HOT: &str =
     "Mac is too hot to keep running with the lid closed. Let it cool down and try again.";
 
+/// Failure to release or install an application sleep-prevention session.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum SessionError {
+    /// Normal sleep restoration failed.
+    #[error(
+        "Couldn't restore normal sleep: {source}. Run `sudo pmset -a disablesleep 0` in Terminal."
+    )]
+    Restore {
+        /// Guardian restoration failure.
+        #[source]
+        source: crate::lid::LidError,
+    },
+    /// State is busy or has not been initialized.
+    #[error("App state is busy or unavailable")]
+    StateUnavailable,
+    /// A failed operation also failed to roll back a newly acquired session.
+    #[error("{source} {rollback}")]
+    Rollback {
+        /// Initial session failure.
+        #[source]
+        source: Box<Self>,
+        /// Additional cleanup failure.
+        rollback: Box<Self>,
+    },
+}
+
 /// Owned `AppKit` state and controllers for the status item, popover, and timers.
+#[derive(Debug)]
 pub struct AppState {
     /// Native status item in the menu bar.
     pub status_item: Retained<NSStatusItem>,
@@ -60,14 +90,31 @@ pub struct AppState {
     pub error_message: Option<String>,
 }
 
+/// Immutable platform boundary alongside independently borrowed application state.
+#[derive(Debug)]
+pub struct DelegateIvars {
+    /// Paths and platform effects fixed at delegate construction.
+    pub environment: AppEnvironment,
+    /// Mutable UI and session state.
+    pub state: RefCell<Option<AppState>>,
+}
+
 define_class!(
     /// Main application delegate coordinating AppKit events, popovers, and power assertions.
     #[unsafe(super(NSObject))]
     #[thread_kind = MainThreadOnly]
-    #[ivars = RefCell<Option<AppState>>]
+    #[ivars = DelegateIvars]
     pub struct AppDelegate;
 
     unsafe impl NSObjectProtocol for AppDelegate {}
+
+    unsafe impl NSPopoverDelegate for AppDelegate {
+        #[unsafe(method(popoverDidClose:))]
+        fn popover_did_close(&self, _notification: &NSNotification) {
+            self.remove_outside_click_monitor();
+            self.stop_countdown_timer();
+        }
+    }
 
     unsafe impl NSApplicationDelegate for AppDelegate {
         #[unsafe(method(applicationDidFinishLaunching:))]
@@ -91,7 +138,6 @@ define_class!(
         /// Handles left and right clicks on the status item button.
         #[unsafe(method(statusItemClicked:))]
         fn status_item_clicked(&self, sender: &NSStatusBarButton) {
-            // SAFETY: currentEvent is called on the shared application on the main thread.
             let app = NSApplication::sharedApplication(MainThreadMarker::from(self));
             if let Some(ev) = app.currentEvent()
                 && ev.r#type() == NSEventType::RightMouseUp
@@ -124,12 +170,17 @@ define_class!(
         /// Handles clicks on the primary Start / Stop button.
         #[unsafe(method(startStopClicked:))]
         fn start_stop_clicked(&self, _sender: &NSButton) {
-            let _ = self.handle_start_stop(true);
+            if let Err(_displayed_error) = self.handle_start_stop(true) {
+                // handle_start_stop displays failures at the UI boundary.
+            }
         }
         /// Terminates the application when Quit is clicked in the context menu.
         #[unsafe(method(quit:))]
         fn quit(&self, _sender: Option<&AnyObject>) {
-            self.terminate_app();
+            match self.stop_session() {
+                Ok(()) => self.terminate_app(),
+                Err(error) => self.report_session_error(&error),
+            }
         }
     }
 );
@@ -138,63 +189,72 @@ impl AppDelegate {
     /// Creates and initializes a new retained instance of `AppDelegate`.
     #[must_use]
     pub fn new(mtm: MainThreadMarker) -> Retained<Self> {
-        let this = mtm.alloc::<Self>().set_ivars(RefCell::new(None));
-        // SAFETY: standard NSObject init on a freshly allocated instance.
-        unsafe { msg_send![super(this), init] }
+        Self::allocate(mtm, AppEnvironment::system())
     }
+
+    fn allocate(mtm: MainThreadMarker, environment: AppEnvironment) -> Retained<Self> {
+        let this = mtm.alloc::<Self>().set_ivars(DelegateIvars {
+            environment,
+            state: RefCell::new(None),
+        });
+        #[expect(
+            unsafe_code,
+            reason = "NSObject superclass initialization requires the Objective-C message ABI"
+        )]
+        // SAFETY: MainThreadMarker allocated this valid NSObject subclass with initialized ivars;
+        // NSObject init has the expected retained-object return ABI.
+        unsafe {
+            msg_send![super(this), init]
+        }
+    }
+    /// Creates a delegate and initializes its UI with isolated platform effects.
+    #[cfg(feature = "test-util")]
+    #[must_use]
+    pub fn new_with_environment(
+        mtm: MainThreadMarker,
+        environment: AppEnvironment,
+    ) -> Retained<Self> {
+        let delegate = Self::allocate(mtm, environment);
+        delegate.init_app_state(mtm);
+        delegate
+    }
+
     /// Initializes native `AppKit` UI elements and controllers.
     pub fn init_app_state(&self, mtm: MainThreadMarker) {
+        let environment = &self.ivars().environment;
         let status_bar = NSStatusBar::systemStatusBar();
         let status_item = status_bar.statusItemWithLength(NSVariableStatusItemLength);
 
         if let Some(button) = status_item.button(mtm) {
-            // SAFETY: setTarget, setAction, and sendActionOn are called on the main thread.
-            unsafe {
-                button.setTarget(Some(self));
-                button.setAction(Some(sel!(statusItemClicked:)));
-                button.sendActionOn(NSEventMask::LeftMouseUp | NSEventMask::RightMouseUp);
-            }
+            Self::connect_button(&button, self, sel!(statusItemClicked:));
+            // sendActionOn is safe and only configures the event mask.
+            button.sendActionOn(NSEventMask::LeftMouseUp | NSEventMask::RightMouseUp);
             button.setToolTip(Some(&NSString::from_str("Melaffeine")));
         } else {
-            eprintln!("Melaffeine: Failed to obtain NSStatusBarButton");
+            tracing::error!("failed to obtain NSStatusBarButton");
         }
         let popover = NSPopover::new(mtm);
         popover.setBehavior(NSPopoverBehavior::Transient);
+        popover.setDelegate(Some(ProtocolObject::from_ref(self)));
         let controls = build_content_view(mtm);
         let height = controls.layout_footer();
         popover.setContentSize(NSSize::new(MENU_WIDTH, height));
 
-        // SAFETY: setTarget and setAction are called on the main thread.
-        unsafe {
-            controls.no_time_limit_button.setTarget(Some(self));
-            controls
-                .no_time_limit_button
-                .setAction(Some(sel!(noTimeLimitChanged:)));
-
-            controls.mode_system_button.setTarget(Some(self));
-            controls
-                .mode_system_button
-                .setAction(Some(sel!(awakeModeChanged:)));
-
-            controls.mode_display_button.setTarget(Some(self));
-            controls
-                .mode_display_button
-                .setAction(Some(sel!(awakeModeChanged:)));
-
-            controls.mode_lid_button.setTarget(Some(self));
-            controls
-                .mode_lid_button
-                .setAction(Some(sel!(awakeModeChanged:)));
-
-            controls.start_stop_button.setTarget(Some(self));
-            controls
-                .start_stop_button
-                .setAction(Some(sel!(startStopClicked:)));
-        }
+        Self::connect_button(
+            &controls.no_time_limit_button,
+            self,
+            sel!(noTimeLimitChanged:),
+        );
+        Self::connect_button(&controls.mode_system_button, self, sel!(awakeModeChanged:));
+        Self::connect_button(&controls.mode_display_button, self, sel!(awakeModeChanged:));
+        Self::connect_button(&controls.mode_lid_button, self, sel!(awakeModeChanged:));
+        Self::connect_button(&controls.start_stop_button, self, sel!(startStopClicked:));
         let view_controller = NSViewController::new(mtm);
         view_controller.setView(&controls.view);
         popover.setContentViewController(Some(&view_controller));
 
+        let recovery = environment.recover_stale();
+        let ipc_socket = environment.ipc_socket().map(std::path::Path::to_path_buf);
         let app_state = AppState {
             status_item,
             popover,
@@ -210,20 +270,51 @@ impl AppDelegate {
             error_message: None,
         };
 
-        *self.ivars().borrow_mut() = Some(app_state);
-        crate::lid::reset_if_stale();
+        match self.ivars().state.try_borrow_mut() {
+            Ok(mut state) => *state = Some(app_state),
+            Err(error) => {
+                tracing::error!(%error, "App state is busy");
+                return;
+            }
+        }
+        if let Err(error) = recovery {
+            tracing::error!(%error, "failed to restore stale sleep suppression");
+            self.show_error(&Self::sleep_restore_message(&error));
+        }
         let weak_self: Weak<Self> = Weak::from_retained(&Retained::from(self));
-        let server = IpcServer::start(mtm, &socket_path(), move |cmd| {
-            weak_self.load().map_or_else(
-                || IpcResponse::Err(String::from("App unavailable")),
-                |delegate| delegate.execute_ipc_command(cmd),
-            )
+        let server = ipc_socket.as_deref().and_then(|path| {
+            IpcServer::start(mtm, path, move |cmd| {
+                weak_self.load().map_or_else(
+                    || IpcResponse::Err(String::from("App unavailable")),
+                    |delegate| delegate.execute_ipc_command(cmd),
+                )
+            })
         });
         if server.is_none() {
-            eprintln!("Melaffeine: IPC server failed to start; CLI control unavailable");
+            tracing::warn!("IPC server failed to start; CLI control unavailable");
         }
         self.with_state_mut(|state| state.ipc_server = server);
         self.update_ui();
+    }
+
+    fn connect_button(button: &NSButton, target: &Self, action: objc2::runtime::Sel) {
+        #[expect(
+            unsafe_code,
+            reason = "AppKit target pointers must remain valid for action dispatch"
+        )]
+        // SAFETY: target is the main-thread delegate owning these controls, so it outlives them.
+        unsafe {
+            button.setTarget(Some(target));
+        };
+        #[expect(
+            unsafe_code,
+            reason = "AppKit action selectors must match the target callback ABI"
+        )]
+        // SAFETY: all callers pass this class's registered action with one object sender argument;
+        // target outlives the controls it owns, and MainThreadOnly constrains both objects.
+        unsafe {
+            button.setAction(Some(action));
+        };
     }
 
     /// Toggles popover visibility relative to the status bar button.
@@ -240,7 +331,10 @@ impl AppDelegate {
         self.update_ui();
         let mtm = MainThreadMarker::from(self);
         let app = NSApplication::sharedApplication(mtm);
-        #[allow(deprecated)]
+        #[expect(
+            deprecated,
+            reason = "activateIgnoringOtherApps ensures popover keyboard focus; cooperative NSApplication::activate may not take focus"
+        )]
         app.activateIgnoringOtherApps(true);
         self.with_state(|state| {
             let bounds = button.bounds();
@@ -250,7 +344,10 @@ impl AppDelegate {
             if let Some(vc) = state.popover.contentViewController()
                 && let Some(window) = vc.view().window()
             {
-                let _ = window.makeFirstResponder(None);
+                // Clearing the responder is best-effort; AppKit may refuse a focus change.
+                if !window.makeFirstResponder(None) {
+                    tracing::debug!("popover window refused to clear its first responder");
+                }
             }
         });
 
@@ -263,19 +360,31 @@ impl AppDelegate {
         self.remove_outside_click_monitor();
         self.stop_countdown_timer();
 
-        self.with_state(|state| {
-            if state.popover.isShown() {
-                // SAFETY: performClose is called on the main thread.
-                unsafe { state.popover.performClose(None) };
-            }
-        });
+        let popover = self.with_state(|state| state.popover.clone());
+        if let Some(popover) = popover
+            && popover.isShown()
+        {
+            #[expect(
+                unsafe_code,
+                reason = "AppKit performClose sends an action with an optional object sender"
+            )]
+            // SAFETY: the retained popover is live on the main thread and None supplies no sender pointer.
+            unsafe {
+                popover.performClose(None);
+            };
+        }
     }
 
     /// Displays the ephemeral right-click context menu containing Quit.
     pub fn show_context_menu(&self) {
         let mtm = MainThreadMarker::from(self);
         let menu = NSMenu::new(mtm);
-        // SAFETY: initWithTitle_action_keyEquivalent is called on the main thread.
+        #[expect(
+            unsafe_code,
+            reason = "AppKit menu action selector must match its target callback ABI"
+        )]
+        // SAFETY: MainThreadMarker proves the main thread; quit: is registered with a single
+        // optional object sender argument, and the title and key-equivalent strings are live.
         let quit_item = unsafe {
             NSMenuItem::initWithTitle_action_keyEquivalent(
                 mtm.alloc(),
@@ -291,8 +400,14 @@ impl AppDelegate {
         if let Some((item, button)) = status_item {
             item.setMenu(Some(&menu));
             if let Some(btn) = button {
-                // SAFETY: performClick is called on the main thread.
-                unsafe { btn.performClick(None) };
+                #[expect(
+                    unsafe_code,
+                    reason = "AppKit performClick sends an action with an optional object sender"
+                )]
+                // SAFETY: the retained button is live on the main thread and None supplies no sender pointer.
+                unsafe {
+                    btn.performClick(None);
+                };
             }
             item.setMenu(None);
         }
@@ -316,8 +431,15 @@ impl AppDelegate {
     pub fn remove_outside_click_monitor(&self) {
         self.with_state_mut(|state| {
             if let Some(monitor) = state.outside_click_monitor.take() {
-                // SAFETY: removeMonitor is safe to call with a retained event monitor.
-                unsafe { NSEvent::removeMonitor(&monitor) };
+                #[expect(
+                    unsafe_code,
+                    reason = "AppKit event monitor removal requires an owned live monitor token"
+                )]
+                // SAFETY: this live retained token came from addGlobalMonitor; taking it from state
+                // ensures exactly one removal, and the delegate runs only on the main thread.
+                unsafe {
+                    NSEvent::removeMonitor(&monitor);
+                };
             }
         });
     }
@@ -325,6 +447,9 @@ impl AppDelegate {
     /// Starts or updates power assertion based on UI inputs.
     ///
     /// Returns `Ok(true)` if sleep prevention was started, `Ok(false)` if stopped.
+    ///
+    /// # Errors
+    /// Returns an inline-displayed message if inputs, authorization, or session startup fail.
     pub fn handle_start_stop(&self, interactive: bool) -> Result<bool, String> {
         let result = self.try_start_stop(interactive);
         if let Err(error) = &result {
@@ -366,20 +491,24 @@ impl AppDelegate {
                     }
                 },
             )
-            .ok_or_else(|| String::from("App state not initialized"))??;
+            .ok_or_else(|| SessionError::StateUnavailable.to_string())??;
 
         if is_active {
-            self.stop_session();
+            self.stop_session().map_err(|error| {
+                self.report_session_error(&error);
+                error.to_string()
+            })?;
             Ok(false)
         } else {
             let use_lid = duration.is_some() && mode == AwakeMode::LidClosed;
             let keep_display = mode == AwakeMode::Display;
 
+            let environment = &self.ivars().environment;
             let lid_session = if use_lid {
-                if crate::lid::thermal_too_hot() {
+                if environment.thermal_too_hot() {
                     return Err(String::from(ERROR_THERMAL_TOO_HOT));
                 }
-                match crate::lid::LidSession::start() {
+                match environment.start_lid() {
                     Ok(session) => Some(session),
                     Err(_start_err) => {
                         if !interactive {
@@ -387,8 +516,8 @@ impl AppDelegate {
                                 "Open Melaffeine and click Start once to set up lid-closed mode.",
                             ));
                         }
-                        crate::lid::authorize()?;
-                        Some(crate::lid::LidSession::start()?)
+                        environment.authorize()?;
+                        Some(environment.start_lid().map_err(|error| error.to_string())?)
                     }
                 }
             } else {
@@ -396,45 +525,98 @@ impl AppDelegate {
             };
 
             if let Err(power_err) = self.start_session(duration, keep_display) {
-                drop(lid_session);
-                return Err(power_err);
+                return match Self::release_lid(lid_session) {
+                    Ok(()) => Err(power_err),
+                    Err(restore_err) => {
+                        self.report_session_error(&restore_err);
+                        Err(format!("{power_err} {restore_err}"))
+                    }
+                };
             }
 
             if let Some(session) = lid_session {
-                let timer =
-                    self.schedule_timer(THERMAL_CHECK_INTERVAL, true, Self::check_thermal_state);
-                let prev_lid = self
-                    .with_state_mut(|state| {
-                        let prev = Self::take_lid_session(state);
-                        state.lid = Some(session);
-                        state.thermal_timer = Some(timer);
-                        prev
-                    })
-                    .flatten();
-                drop(prev_lid);
+                self.install_lid_session(session).map_err(|error| {
+                    self.report_session_error(&error);
+                    error.to_string()
+                })?;
             }
 
             Ok(true)
         }
     }
 
+    /// Installs a lid session only after the previous guardian has finished resetting.
+    fn install_lid_session(&self, session: crate::lid::LidSession) -> Result<(), SessionError> {
+        let previous = self.with_state_mut(Self::take_lid_session);
+        let restore = previous
+            .ok_or(SessionError::StateUnavailable)
+            .and_then(Self::release_lid);
+        if let Err(mut source) = restore {
+            if let Err(rollback) = Self::release_lid(Some(session)) {
+                source = SessionError::Rollback {
+                    source: Box::new(source),
+                    rollback: Box::new(rollback),
+                };
+            }
+            // Stop ordinary assertions even if restoring the new guardian also failed.
+            if let Err(rollback) = self.stop_session() {
+                source = SessionError::Rollback {
+                    source: Box::new(source),
+                    rollback: Box::new(rollback),
+                };
+            }
+            return Err(source);
+        }
+        let timer = self.schedule_timer(THERMAL_CHECK_INTERVAL, true, Self::check_thermal_state);
+        let mut session = Some(session);
+        if self
+            .with_state_mut(|state| {
+                state.lid = session.take();
+                state.thermal_timer = Some(timer.clone());
+            })
+            .is_none()
+        {
+            timer.invalidate();
+            return match Self::release_lid(session) {
+                Ok(()) => Err(SessionError::StateUnavailable),
+                Err(rollback) => Err(SessionError::Rollback {
+                    source: Box::new(SessionError::StateUnavailable),
+                    rollback: Box::new(rollback),
+                }),
+            };
+        }
+        Ok(())
+    }
+
     /// Starts a power assertion session for the specified duration and display setting.
+    ///
+    /// # Errors
+    /// Returns a message if state is uninitialized, previous sleep restoration fails,
+    /// the clock overflows, or assertion acquisition fails.
     pub fn start_session(
         &self,
         duration_opt: Option<Duration>,
         keep_display: bool,
     ) -> Result<(), String> {
-        let (lid, start_result) = self
+        let lid = self
             .with_state_mut(|state| {
                 state.error_message = None;
                 let lid = Self::invalidate_timers(state);
-                let result = state
-                    .power
-                    .start(duration_opt, keep_display, SystemTime::now());
-                (lid, result)
+                state.power.stop();
+                lid
             })
-            .ok_or_else(|| String::from("App state not initialized"))?;
-        drop(lid);
+            .ok_or_else(|| SessionError::StateUnavailable.to_string())?;
+        if let Err(error) = Self::release_lid(lid) {
+            self.report_session_error(&error);
+            return Err(error.to_string());
+        }
+        let start_result = self
+            .with_state_mut(|state| {
+                state
+                    .power
+                    .start(duration_opt, keep_display, SystemTime::now())
+            })
+            .ok_or_else(|| SessionError::StateUnavailable.to_string())?;
 
         if let Err(error) = start_result {
             self.update_ui();
@@ -449,7 +631,6 @@ impl AppDelegate {
     }
 
     /// Executes an incoming IPC command and generates a structured response.
-    #[allow(clippy::option_if_let_else)]
     pub fn execute_ipc_command(&self, command: &IpcCommand) -> IpcResponse {
         match command {
             IpcCommand::Status => self
@@ -468,11 +649,14 @@ impl AppDelegate {
                         remaining_compact,
                     }))
                 })
-                .unwrap_or_else(|| IpcResponse::Err(String::from("App not initialized"))),
-            IpcCommand::Stop => {
-                self.stop_session();
-                IpcResponse::Ok(String::from("Stopped sleep prevention"))
-            }
+                .unwrap_or_else(|| IpcResponse::Err(SessionError::StateUnavailable.to_string())),
+            IpcCommand::Stop => match self.stop_session() {
+                Ok(()) => IpcResponse::Ok(String::from("Stopped sleep prevention")),
+                Err(error) => {
+                    self.report_session_error(&error);
+                    IpcResponse::Err(error.to_string())
+                }
+            },
             // Toggle when inactive intentionally starts from the current UI control
             // state (duration field, unit popup, radios), so remote toggling
             // reflects what the user last configured in the popover.
@@ -504,24 +688,56 @@ impl AppDelegate {
                     Err(e) => IpcResponse::Err(e),
                 }
             }
-            IpcCommand::Quit => {
-                self.schedule_timer(0.05, false, Self::terminate_app);
-                IpcResponse::Ok(String::from("Terminating"))
-            }
+            IpcCommand::Quit => match self.stop_session() {
+                Ok(()) => {
+                    self.schedule_timer(0.05, false, Self::terminate_app);
+                    IpcResponse::Ok(String::from("Terminating"))
+                }
+                Err(error) => {
+                    self.report_session_error(&error);
+                    IpcResponse::Err(error.to_string())
+                }
+            },
         }
     }
 
     /// Stops the active session (power assertion and timers) and updates UI.
-    pub fn stop_session(&self) {
+    ///
+    /// # Errors
+    /// Returns a typed error if state is unavailable or normal sleep cannot be restored.
+    pub fn stop_session(&self) -> Result<(), SessionError> {
         let lid = self
             .with_state_mut(|state| {
                 let lid = Self::invalidate_timers(state);
                 state.power.stop();
                 lid
             })
-            .flatten();
-        drop(lid);
+            .ok_or(SessionError::StateUnavailable)?;
+        let result = Self::release_lid(lid);
         self.update_ui();
+        result
+    }
+
+    fn report_session_error(&self, error: &SessionError) {
+        // Borrow helpers already report access conflicts at the failing borrow.
+        if !matches!(error, SessionError::StateUnavailable) {
+            tracing::error!(%error, "session operation failed");
+        }
+        self.show_error(&error.to_string());
+    }
+
+    fn sleep_restore_message(error: &crate::lid::LidError) -> String {
+        format!(
+            "{ERROR_SLEEP_RESTORE_PREFIX}{error}. Run `sudo pmset -a disablesleep 0` in Terminal."
+        )
+    }
+
+    fn release_lid(lid: Option<crate::lid::LidSession>) -> Result<(), SessionError> {
+        if let Some(lid) = lid {
+            lid.stop()
+                .map_err(|source| SessionError::Restore { source })?;
+        }
+        Ok(())
     }
 
     /// Schedules a one-shot expiry timer that re-checks the wall-clock end time on
@@ -549,7 +765,9 @@ impl AppDelegate {
                 self.with_state_mut(|state| state.expiry_timer = Some(timer));
             }
             Some(None) => {
-                self.stop_session();
+                if let Err(error) = self.stop_session() {
+                    self.report_session_error(&error);
+                }
             }
             None => {}
         }
@@ -567,47 +785,7 @@ impl AppDelegate {
             let countdown_text = self.format_countdown(ends_at);
             let projection = compute_ui_projection(active, no_time_limit, countdown_text);
 
-            state
-                .controls
-                .start_stop_button
-                .setTitle(&NSString::from_str(projection.start_stop_title));
-            state
-                .controls
-                .no_time_limit_button
-                .setEnabled(projection.inputs_enabled);
-            state
-                .controls
-                .mode_system_button
-                .setEnabled(projection.inputs_enabled);
-            state
-                .controls
-                .mode_display_button
-                .setEnabled(projection.inputs_enabled);
-            state
-                .controls
-                .duration_field
-                .setEnabled(projection.duration_enabled);
-            state
-                .controls
-                .unit_popup
-                .setEnabled(projection.duration_enabled);
-            state
-                .controls
-                .mode_lid_button
-                .setEnabled(projection.lid_enabled);
-            if let Some(countdown) = &projection.countdown_text {
-                state
-                    .controls
-                    .time_label
-                    .setStringValue(&NSString::from_str(countdown));
-                state.controls.time_label.setHidden(false);
-            } else {
-                state
-                    .controls
-                    .time_label
-                    .setStringValue(&NSString::from_str(""));
-                state.controls.time_label.setHidden(true);
-            }
+            Self::apply_controls_projection(&state.controls, &projection);
 
             if let Some(err) = &state.error_message {
                 state
@@ -654,6 +832,35 @@ impl AppDelegate {
         }
     }
 
+    fn apply_controls_projection(controls: &PopoverControls, projection: &crate::ui::UiProjection) {
+        controls
+            .start_stop_button
+            .setTitle(&NSString::from_str(projection.start_stop_title));
+        controls
+            .no_time_limit_button
+            .setEnabled(projection.inputs_enabled);
+        controls
+            .mode_system_button
+            .setEnabled(projection.inputs_enabled);
+        controls
+            .mode_display_button
+            .setEnabled(projection.inputs_enabled);
+        controls
+            .duration_field
+            .setEnabled(projection.duration_enabled);
+        controls.unit_popup.setEnabled(projection.duration_enabled);
+        controls.mode_lid_button.setEnabled(projection.lid_enabled);
+        if let Some(countdown) = &projection.countdown_text {
+            controls
+                .time_label
+                .setStringValue(&NSString::from_str(countdown));
+            controls.time_label.setHidden(false);
+        } else {
+            controls.time_label.setStringValue(&NSString::from_str(""));
+            controls.time_label.setHidden(true);
+        }
+    }
+
     /// Formats the countdown string if a finite session is active with a future end time.
     pub fn format_countdown(&self, ends_at: Option<SystemTime>) -> Option<String> {
         let ends_at = ends_at?;
@@ -678,6 +885,7 @@ impl AppDelegate {
         Some(format!("Ends at {time_str} · {compact} left"))
     }
 
+    /// Displays an inline error and refreshes the popover layout.
     pub fn show_error(&self, message: &str) {
         self.with_state_mut(|state| {
             state.error_message = Some(message.to_string());
@@ -695,6 +903,7 @@ impl AppDelegate {
         self.update_ui();
     }
 
+    /// Starts countdown updates only for an open popover with an active finite session.
     pub fn start_countdown_timer_if_needed(&self) {
         let should_start = self
             .with_state(|s| {
@@ -727,30 +936,73 @@ impl AppDelegate {
     /// Tears down all timers, monitors, and active power assertions upon quit.
     pub fn teardown(&self) {
         self.with_state_mut(|state| {
-            if let Some(mut server) = state.ipc_server.take() {
+            if let Some(server) = state.ipc_server.take() {
                 server.stop();
             }
         });
         self.remove_outside_click_monitor();
-        self.stop_session();
+        let lid = self
+            .with_state_mut(|state| {
+                let lid = Self::invalidate_timers(state);
+                state.power.stop();
+                lid
+            })
+            .ok_or(SessionError::StateUnavailable)
+            .and_then(Self::release_lid);
+        if let Err(error) = lid {
+            tracing::error!(%error, "failed to restore normal sleep during termination");
+        }
+        self.update_ui();
     }
 
     /// Runs `f` with a shared borrow of the app state, if initialized.
     fn with_state<R>(&self, f: impl FnOnce(&AppState) -> R) -> Option<R> {
-        self.ivars().borrow().as_ref().map(f)
+        match self.ivars().state.try_borrow() {
+            Ok(state) => state.as_ref().map(f),
+            Err(error) => {
+                tracing::error!(%error, "App state is busy");
+                None
+            }
+        }
     }
 
     /// Runs `f` with an exclusive borrow of the app state, if initialized.
     fn with_state_mut<R>(&self, f: impl FnOnce(&mut AppState) -> R) -> Option<R> {
-        self.ivars().borrow_mut().as_mut().map(f)
+        match self.ivars().state.try_borrow_mut() {
+            Ok(mut state) => state.as_mut().map(f),
+            Err(error) => {
+                tracing::error!(%error, "App state is busy");
+                None
+            }
+        }
     }
 
     /// Schedules an `NSTimer` on the main run loop invoking `action` on a weakly-held delegate.
     fn schedule_timer(&self, interval: f64, repeats: bool, action: fn(&Self)) -> Retained<NSTimer> {
         let block = self.weak_block::<NSTimer>(action);
-        // SAFETY: scheduledTimerWithTimeInterval_repeats_block is called on the main thread
-        // with an interval >= 0, and the weak block safely drops invocations if deallocated.
-        unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(interval, repeats, &block) }
+        #[expect(
+            unsafe_code,
+            reason = "NSTimer construction requires a valid callback block"
+        )]
+        // SAFETY: the block is retained by the timer and only invoked on the main run loop;
+        // its weak delegate access stays on the main thread, including during menu tracking.
+        let timer =
+            unsafe { NSTimer::timerWithTimeInterval_repeats_block(interval, repeats, &block) };
+        #[expect(
+            unsafe_code,
+            reason = "Foundation exports the common-mode name as a foreign static"
+        )]
+        // SAFETY: Foundation provides this immutable, process-lifetime mode name.
+        let common_modes = unsafe { NSRunLoopCommonModes };
+        #[expect(
+            unsafe_code,
+            reason = "Adding an NSTimer requires keeping its callback on the owning run loop"
+        )]
+        // SAFETY: this main-thread delegate schedules its timer exclusively on the main run loop.
+        unsafe {
+            NSRunLoop::mainRunLoop().addTimer_forMode(&timer, common_modes);
+        };
+        timer
     }
 
     /// Builds a block that invokes `f` on a weakly-held delegate, no-op after dealloc.
@@ -767,11 +1019,16 @@ impl AppDelegate {
     fn check_thermal_state(&self) {
         let has_lid = self.with_state(|s| s.lid.is_some()).unwrap_or(false);
         if !has_lid {
-            let lid = self.with_state_mut(Self::take_lid_session).flatten();
-            drop(lid);
+            let result = self
+                .with_state_mut(Self::take_lid_session)
+                .ok_or(SessionError::StateUnavailable)
+                .and_then(Self::release_lid);
+            if let Err(error) = result {
+                self.report_session_error(&error);
+            }
             return;
         }
-        if crate::lid::thermal_too_hot() {
+        if self.ivars().environment.thermal_too_hot() {
             let lid = self
                 .with_state_mut(|state| {
                     let lid = Self::take_lid_session(state);
@@ -779,8 +1036,12 @@ impl AppDelegate {
                     state.error_message = Some(String::from(NOTICE_THERMAL_CUTOFF));
                     lid
                 })
-                .flatten();
-            drop(lid);
+                .ok_or(SessionError::StateUnavailable)
+                .and_then(Self::release_lid);
+            if let Err(error) = lid {
+                tracing::error!(%error, "thermal cutoff restoration failed");
+                self.show_error(&format!("{NOTICE_THERMAL_CUTOFF} {error}"));
+            }
             self.update_ui();
         }
     }
@@ -810,7 +1071,6 @@ impl AppDelegate {
         self.teardown();
         let mtm = MainThreadMarker::from(self);
         let app = NSApplication::sharedApplication(mtm);
-        // SAFETY: terminate is called on the main thread during explicit user quit.
         app.terminate(None);
     }
 }
