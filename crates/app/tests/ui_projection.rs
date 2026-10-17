@@ -1,3 +1,6 @@
+//! Behavioral integration tests for ui projection.
+#![cfg(test)]
+
 use app::ui::{
     ICON_ACTIVE, ICON_INACTIVE, TITLE_START, TITLE_STOP, UiProjection, compute_ui_projection,
 };
@@ -44,7 +47,8 @@ fn compute_ui_projection_table() {
     for (is_active, no_time_limit, countdown, expected) in cases {
         assert_eq!(
             compute_ui_projection(is_active, no_time_limit, countdown.map(str::to_string)),
-            expected
+            expected,
+            "Unexpected value for compute_ui_projection(is_active, no_time_limit, countdown.map(str::to_string))"
         );
     }
 }

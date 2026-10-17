@@ -1,3 +1,5 @@
+//! Power assertion ownership and finite-session timestamps.
+
 use std::error::Error;
 use std::fmt;
 use std::time::{Duration, SystemTime};

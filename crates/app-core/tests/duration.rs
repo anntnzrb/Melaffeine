@@ -1,4 +1,6 @@
-#![allow(clippy::duration_suboptimal_units)]
+//! Behavioral coverage for the public duration contract.
+
+#![cfg(test)]
 use std::time::Duration;
 
 use app_core::{DurationUnit, format_compact_duration, parse_duration, parse_duration_spec};
@@ -145,41 +147,41 @@ fn format_compact_duration_cases() {
         (Duration::from_secs(1), "1m"),
         (Duration::from_secs(30), "1m"),
         (Duration::from_secs(59), "1m"),
-        (Duration::from_secs(60), "1m"),
+        (Duration::from_mins(1), "1m"),
         // Positive partial minutes round up
-        (Duration::from_secs(60) + Duration::from_nanos(1), "2m"),
+        (Duration::from_mins(1) + Duration::from_nanos(1), "2m"),
         (Duration::from_secs(61), "2m"),
         (Duration::from_secs(119), "2m"),
-        (Duration::from_secs(120), "2m"),
+        (Duration::from_mins(2), "2m"),
         (Duration::from_secs(121), "3m"),
         (Duration::from_secs(179), "3m"),
         // Minute and hour boundaries
-        (Duration::from_secs(3540), "59m"),   // 59 minutes
+        (Duration::from_mins(59), "59m"),     // 59 minutes
         (Duration::from_secs(3541), "1h 0m"), // 59m 1s rounds up
         (Duration::from_secs(3599), "1h 0m"), // 59m 59s rounds up
-        (Duration::from_secs(3600), "1h 0m"), // exactly 1 hour
+        (Duration::from_hours(1), "1h 0m"),   // exactly 1 hour
         (Duration::from_secs(3601), "1h 1m"), // 1h 0m 1s rounds up
         (Duration::from_secs(3659), "1h 1m"), // 1h 0m 59s rounds up
-        (Duration::from_secs(3660), "1h 1m"), // 1h 1m 0s
-        (Duration::from_secs(7140), "1h 59m"),
+        (Duration::from_mins(61), "1h 1m"),   // 1h 1m 0s
+        (Duration::from_mins(119), "1h 59m"),
         (Duration::from_secs(7141), "2h 0m"), // 1h 59m 1s rounds up
         (Duration::from_secs(7199), "2h 0m"), // 1h 59m 59s rounds up
-        (Duration::from_secs(7200), "2h 0m"), // 2 hours
+        (Duration::from_hours(2), "2h 0m"),   // 2 hours
         (Duration::from_secs(7201), "2h 1m"), // 2h 0m 1s rounds up
         (Duration::from_secs(7259), "2h 1m"), // 2h 0m 59s rounds up
-        (Duration::from_secs(7260), "2h 1m"), // 2h 1m 0s
-        (Duration::from_secs(86_340), "23h 59m"),
+        (Duration::from_mins(121), "2h 1m"),  // 2h 1m 0s
+        (Duration::from_mins(1439), "23h 59m"),
         (Duration::from_secs(86_399), "1d 0h"), // 23h 59m 59s rounds up
         // Day boundaries
-        (Duration::from_secs(86_400), "1d 0h"), // exactly 1 day
+        (Duration::from_hours(24), "1d 0h"),    // exactly 1 day
         (Duration::from_secs(86_401), "1d 0h"), // 1d 1s -> 1d 0h
-        (Duration::from_secs(89_940), "1d 0h"), // 1d 59m -> 1d 0h
+        (Duration::from_mins(1499), "1d 0h"),   // 1d 59m -> 1d 0h
         (Duration::from_secs(89_999), "1d 1h"), // 1d 59m 59s rounds up
-        (Duration::from_secs(90_000), "1d 1h"), // 1 day 1 hour
+        (Duration::from_hours(25), "1d 1h"),    // 1 day 1 hour
         (Duration::from_secs(90_001), "1d 1h"), // 1d 1h 1s -> 1d 1h
-        (Duration::from_secs(169_200), "1d 23h"),
-        (Duration::from_secs(882_000), "10d 5h"),
-        (Duration::from_secs(31_536_000), "365d 0h"),
+        (Duration::from_hours(47), "1d 23h"),
+        (Duration::from_hours(245), "10d 5h"),
+        (Duration::from_hours(8760), "365d 0h"),
         // Maximum duration bounds
         (Duration::MAX, "213503982334601d 7h"),
     ];

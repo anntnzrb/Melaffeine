@@ -1,22 +1,34 @@
+//! Bounded duration parsing and compact, minute-rounded countdown text.
+
 use std::time::Duration;
 
 const MIN_DURATION_VALUE: u64 = 1;
 const SECONDS_PER_MINUTE: u64 = 60;
 const SECONDS_PER_HOUR: u64 = 3600;
 const SECONDS_PER_DAY: u64 = 86400;
+/// Maximum finite session length in seconds: 365 days.
 pub const MAX_FINITE_DURATION_SECONDS: u64 = 31_536_000;
 const MINUTES_PER_DAY: u64 = 1440;
 const MINUTES_PER_HOUR: u64 = 60;
 const HOURS_PER_DAY: u64 = 24;
 
+/// Unit applied to an unsigned integer by [`parse_duration`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DurationUnit {
+    /// Seconds, with no conversion multiplier.
     Seconds,
+    /// Minutes of 60 seconds each.
     Minutes,
+    /// Hours of 3,600 seconds each.
     Hours,
+    /// Days of 86,400 seconds each.
     Days,
 }
 
+/// Parses a positive ASCII integer in the given unit, bounded to 365 days.
+///
+/// Returns `None` for empty input, whitespace, signs, non-digits, zero,
+/// integer overflow, or a result exceeding [`MAX_FINITE_DURATION_SECONDS`].
 #[must_use]
 pub fn parse_duration(input: &str, unit: DurationUnit) -> Option<Duration> {
     if input.is_empty() || !input.bytes().all(|b| b.is_ascii_digit()) {
@@ -44,6 +56,23 @@ pub fn parse_duration(input: &str, unit: DurationUnit) -> Option<Duration> {
     Some(Duration::from_secs(total_seconds))
 }
 
+/// Formats a countdown using minutes, hours and minutes, or days and hours.
+///
+/// Positive durations round up to the next minute before choosing units.
+/// Zero is shown as `<1m`; day-based output omits remaining minutes.
+/// The conversion saturates at the maximum whole-second duration.
+///
+/// # Examples
+///
+/// ```
+/// use std::time::Duration;
+/// use app_core::format_compact_duration;
+///
+/// assert_eq!(format_compact_duration(Duration::from_secs(61)), "2m",
+///     "partial minutes round up");
+/// assert_eq!(format_compact_duration(Duration::from_secs(3660)), "1h 1m",
+///     "hour-based countdowns include remaining minutes");
+/// ```
 #[must_use]
 pub fn format_compact_duration(remaining: Duration) -> String {
     let seconds = remaining
@@ -69,7 +98,26 @@ pub fn format_compact_duration(remaining: Duration) -> String {
     }
 }
 
-/// Helper to parse duration string with flexible suffixes (`m`, `h`, `d`, `s` or bare minutes).
+/// Parses a duration with a seconds, minutes, hours, or days suffix.
+///
+/// Trims surrounding whitespace and accepts case-insensitive `s`, `m`, `h`,
+/// and `d` suffixes; bare integers mean minutes. The numeric part follows
+/// [`parse_duration`]: invalid, zero, overflowing, or over-365-day values
+/// return `None`.
+///
+/// # Examples
+///
+/// ```
+/// use std::time::Duration;
+/// use app_core::parse_duration_spec;
+///
+/// assert_eq!(parse_duration_spec(" 2H "), Some(Duration::from_hours(2)),
+///     "suffixes ignore case and surrounding whitespace");
+/// assert_eq!(parse_duration_spec("15"), Some(Duration::from_mins(15)),
+///     "bare integers mean minutes");
+/// assert_eq!(parse_duration_spec("366d"), None,
+///     "finite sessions cannot exceed 365 days");
+/// ```
 #[must_use]
 pub fn parse_duration_spec(spec: &str) -> Option<Duration> {
     let trimmed = spec.trim();
