@@ -12,9 +12,10 @@ pub struct IOKitAssertion {
 impl Drop for IOKitAssertion {
     fn drop(&mut self) {
         if self.id != 0 {
-            // SAFETY: `self.id` is a valid, active assertion ID obtained from
-            // `IOPMAssertionCreateWithName`. Releasing it once here tears down the assertion.
-            let _ = objc2_io_kit::IOPMAssertionRelease(self.id);
+            let code = objc2_io_kit::IOPMAssertionRelease(self.id);
+            if code != objc2_io_kit::kIOReturnSuccess {
+                tracing::warn!(code, "failed to release power assertion");
+            }
             self.id = 0;
         }
     }
@@ -37,6 +38,10 @@ impl AssertionProvider for IOKitProvider {
         let name_cf = CFString::from_static_str("Melaffeine");
         let mut assertion_id: objc2_io_kit::IOPMAssertionID = 0;
 
+        #[expect(
+            unsafe_code,
+            reason = "IOKit assertion creation writes to a caller-owned output ID"
+        )]
         // SAFETY: `IOPMAssertionCreateWithName` is called with valid CFString pointers,
         // valid assertion level constant, and a valid mutable pointer to receive the assertion ID.
         let ret = unsafe {

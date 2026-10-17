@@ -16,7 +16,10 @@ publish = false
 name = "melaffeine"
 
 [workspace.dependencies]
-app-core = { path = "crates/app-core" }
+thiserror = "2"
+tracing = { version = "0.1.44", default-features = false, features = ["std"] }
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "std"] }
+app-core = { path = "crates/app-core", version = "0.1.0" }
 rustix = { version = "1.1", features = ["process"] }
 objc2 = "0.6.3"
 block2 = "0.6.2"

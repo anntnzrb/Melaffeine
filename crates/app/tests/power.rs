@@ -1,11 +1,6 @@
-#![allow(
-    clippy::unwrap_used,
-    clippy::arithmetic_side_effects,
-    clippy::duration_suboptimal_units,
-    clippy::significant_drop_tightening,
-    clippy::clone_on_copy,
-    dead_code
-)]
+//! Behavioral integration tests for power.
+#![cfg(test)]
+
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::{Duration, SystemTime};
@@ -41,10 +36,6 @@ impl MockAssertionProvider {
         self.state.borrow().active_count
     }
 
-    fn set_should_fail(&self, fail: bool) {
-        self.state.borrow_mut().should_fail = fail;
-    }
-
     fn set_fail_code(&self, code: i32) {
         let mut state = self.state.borrow_mut();
         state.should_fail = true;
@@ -73,9 +64,15 @@ impl AssertionProvider for MockAssertionProvider {
         if state.should_fail {
             return Err(PowerError::AcquisitionFailed(state.fail_code));
         }
-        state.next_id += 1;
+        state.next_id = state
+            .next_id
+            .checked_add(1)
+            .expect("mock assertion IDs must fit usize");
         let id = state.next_id;
-        state.active_count += 1;
+        state.active_count = state
+            .active_count
+            .checked_add(1)
+            .expect("mock active assertion count must fit usize");
         state.events.push(MockEvent::Acquired(id, kind));
         Ok(MockHandle {
             id,
@@ -90,13 +87,22 @@ impl AssertionProvider for MockAssertionProvider {
 #[test]
 fn power_error_display_contains_code() {
     let err_neg1 = PowerError::AcquisitionFailed(-1);
-    assert!(format!("{err_neg1}").contains("-1"));
+    assert!(
+        format!("{err_neg1}").contains("-1"),
+        "Displayed acquisition failure must include its return code: {err_neg1}"
+    );
 
     let err_0 = PowerError::AcquisitionFailed(0);
-    assert!(format!("{err_0}").contains('0'));
+    assert!(
+        format!("{err_0}").contains('0'),
+        "Displayed acquisition failure must include its return code: {err_0}"
+    );
 
     let err_100 = PowerError::AcquisitionFailed(100);
-    assert!(format!("{err_100}").contains("100"));
+    assert!(
+        format!("{err_100}").contains("100"),
+        "Displayed acquisition failure must include its return code: {err_100}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -108,24 +114,41 @@ fn power_controller_new_initializes_inactive_controller() {
     let mock = MockAssertionProvider::default();
     let controller = PowerController::new(mock.clone());
 
-    assert!(!controller.is_active());
-    assert!(!controller.keep_display_awake());
-    assert_eq!(controller.ends_at(), None);
-    assert_eq!(mock.active_count(), 0);
-    assert!(mock.events().is_empty());
+    assert!(
+        !controller.is_active(),
+        "Expected condition: !controller.is_active()"
+    );
+    assert!(
+        !controller.keep_display_awake(),
+        "Expected condition: !controller.keep_display_awake()"
+    );
+    assert_eq!(
+        controller.ends_at(),
+        None,
+        "Unexpected value for controller.ends_at()"
+    );
+    assert_eq!(
+        mock.active_count(),
+        0,
+        "Unexpected value for mock.active_count()"
+    );
+    assert!(
+        mock.events().is_empty(),
+        "Expected condition: mock.events().is_empty()"
+    );
 }
 
 #[test]
 fn start_configures_session_parameters() {
     let cases = [
         (
-            Some(Duration::from_secs(3600)),
+            Some(Duration::from_hours(1)),
             false,
             Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_003_600)),
             AssertionKind::PreventSystemSleep,
         ),
         (
-            Some(Duration::from_secs(1800)),
+            Some(Duration::from_mins(30)),
             true,
             Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_001_800)),
             AssertionKind::PreventDisplaySleep,
@@ -139,13 +162,28 @@ fn start_configures_session_parameters() {
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
 
         let result = controller.start(duration, keep_display, now);
-        assert!(result.is_ok());
-        assert!(controller.is_active());
-        assert_eq!(controller.keep_display_awake(), keep_display);
-        assert_eq!(controller.ends_at(), expected_ends_at);
+        assert_eq!(result, Ok(()), "Unexpected value for result");
+        assert!(
+            controller.is_active(),
+            "Expected condition: controller.is_active()"
+        );
+        assert_eq!(
+            controller.keep_display_awake(),
+            keep_display,
+            "Unexpected value for controller.keep_display_awake()"
+        );
+        assert_eq!(
+            controller.ends_at(),
+            expected_ends_at,
+            "Unexpected value for controller.ends_at()"
+        );
 
         let events = mock.events();
-        assert_eq!(events, vec![MockEvent::Acquired(1, expected_kind)]);
+        assert_eq!(
+            events,
+            vec![MockEvent::Acquired(1, expected_kind)],
+            "Unexpected value for events"
+        );
     }
 }
 
@@ -156,12 +194,20 @@ fn start_with_zero_duration_is_active_with_ends_at_equal_to_start() {
     let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
 
     let result = controller.start(Some(Duration::ZERO), false, now);
-    assert!(result.is_ok());
-    assert!(controller.is_active());
-    assert_eq!(controller.ends_at(), Some(now));
+    assert_eq!(result, Ok(()), "Unexpected value for result");
+    assert!(
+        controller.is_active(),
+        "Expected condition: controller.is_active()"
+    );
+    assert_eq!(
+        controller.ends_at(),
+        Some(now),
+        "Unexpected value for controller.ends_at()"
+    );
     assert_eq!(
         mock.events(),
-        vec![MockEvent::Acquired(1, AssertionKind::PreventSystemSleep)]
+        vec![MockEvent::Acquired(1, AssertionKind::PreventSystemSleep)],
+        "Unexpected value for mock.events()"
     );
 }
 
@@ -170,23 +216,38 @@ fn start_replaces_existing_session_before_acquiring_new() {
     let mock = MockAssertionProvider::default();
     let mut controller = PowerController::new(mock.clone());
     let now1 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
-    let now2 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_500);
+    let now2 = SystemTime::UNIX_EPOCH + Duration::from_mins(16_675);
 
-    assert!(
-        controller
-            .start(Some(Duration::from_secs(3600)), false, now1)
-            .is_ok()
+    assert_eq!(
+        controller.start(Some(Duration::from_hours(1)), false, now1),
+        Ok(()),
+        "Unexpected value for controller .start(Some(Duration::from_hours(1)), false, now1)"
     );
-    assert_eq!(mock.active_count(), 1);
+    assert_eq!(
+        mock.active_count(),
+        1,
+        "Unexpected value for mock.active_count()"
+    );
 
-    assert!(
-        controller
-            .start(Some(Duration::from_secs(7200)), true, now2)
-            .is_ok()
+    assert_eq!(
+        controller.start(Some(Duration::from_hours(2)), true, now2),
+        Ok(()),
+        "Unexpected value for controller .start(Some(Duration::from_hours(2)), true, now2)"
     );
-    assert_eq!(mock.active_count(), 1);
-    assert_eq!(controller.ends_at(), Some(now2 + Duration::from_secs(7200)));
-    assert!(controller.keep_display_awake());
+    assert_eq!(
+        mock.active_count(),
+        1,
+        "Unexpected value for mock.active_count()"
+    );
+    assert_eq!(
+        controller.ends_at(),
+        Some(now2 + Duration::from_hours(2)),
+        "Unexpected value for controller.ends_at()"
+    );
+    assert!(
+        controller.keep_display_awake(),
+        "Expected condition: controller.keep_display_awake()"
+    );
 
     // Proves old handle (1) is released before new (2) is acquired
     let events = mock.events();
@@ -196,7 +257,8 @@ fn start_replaces_existing_session_before_acquiring_new() {
             MockEvent::Acquired(1, AssertionKind::PreventSystemSleep),
             MockEvent::Released(1),
             MockEvent::Acquired(2, AssertionKind::PreventDisplaySleep),
-        ]
+        ],
+        "Unexpected value for events"
     );
 }
 
@@ -206,19 +268,40 @@ fn stop_releases_assertion_and_clears_timestamps() {
     let mut controller = PowerController::new(mock.clone());
     let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
 
-    assert!(
-        controller
-            .start(Some(Duration::from_secs(3600)), false, now)
-            .is_ok()
+    assert_eq!(
+        controller.start(Some(Duration::from_hours(1)), false, now),
+        Ok(()),
+        "Unexpected value for controller .start(Some(Duration::from_hours(1)), false, now)"
     );
-    assert!(controller.is_active());
-    assert_eq!(mock.active_count(), 1);
+    assert!(
+        controller.is_active(),
+        "Expected condition: controller.is_active()"
+    );
+    assert_eq!(
+        mock.active_count(),
+        1,
+        "Unexpected value for mock.active_count()"
+    );
 
     controller.stop();
-    assert!(!controller.is_active());
-    assert!(!controller.keep_display_awake());
-    assert_eq!(controller.ends_at(), None);
-    assert_eq!(mock.active_count(), 0);
+    assert!(
+        !controller.is_active(),
+        "Expected condition: !controller.is_active()"
+    );
+    assert!(
+        !controller.keep_display_awake(),
+        "Expected condition: !controller.keep_display_awake()"
+    );
+    assert_eq!(
+        controller.ends_at(),
+        None,
+        "Unexpected value for controller.ends_at()"
+    );
+    assert_eq!(
+        mock.active_count(),
+        0,
+        "Unexpected value for mock.active_count()"
+    );
 
     let events = mock.events();
     assert_eq!(
@@ -226,7 +309,8 @@ fn stop_releases_assertion_and_clears_timestamps() {
         vec![
             MockEvent::Acquired(1, AssertionKind::PreventSystemSleep),
             MockEvent::Released(1),
-        ]
+        ],
+        "Unexpected value for events"
     );
 }
 
@@ -235,12 +319,29 @@ fn stop_on_inactive_session_is_safe_noop() {
     let mock = MockAssertionProvider::default();
     let mut controller = PowerController::new(mock.clone());
 
-    assert!(!controller.is_active());
+    assert!(
+        !controller.is_active(),
+        "Expected condition: !controller.is_active()"
+    );
     controller.stop();
-    assert!(!controller.is_active());
-    assert_eq!(controller.ends_at(), None);
-    assert_eq!(mock.active_count(), 0);
-    assert!(mock.events().is_empty());
+    assert!(
+        !controller.is_active(),
+        "Expected condition: !controller.is_active()"
+    );
+    assert_eq!(
+        controller.ends_at(),
+        None,
+        "Unexpected value for controller.ends_at()"
+    );
+    assert_eq!(
+        mock.active_count(),
+        0,
+        "Unexpected value for mock.active_count()"
+    );
+    assert!(
+        mock.events().is_empty(),
+        "Expected condition: mock.events().is_empty()"
+    );
 }
 
 #[test]
@@ -250,23 +351,35 @@ fn controller_drop_releases_active_assertion() {
 
     {
         let mut controller = PowerController::new(mock.clone());
-        assert!(
-            controller
-                .start(Some(Duration::from_secs(3600)), false, now)
-                .is_ok()
+        assert_eq!(
+            controller.start(Some(Duration::from_hours(1)), false, now),
+            Ok(()),
+            "Unexpected value for controller .start(Some(Duration::from_hours(1)), false, now)"
         );
-        assert!(controller.is_active());
-        assert_eq!(mock.active_count(), 1);
+        assert!(
+            controller.is_active(),
+            "Expected condition: controller.is_active()"
+        );
+        assert_eq!(
+            mock.active_count(),
+            1,
+            "Unexpected value for mock.active_count()"
+        );
     }
 
-    assert_eq!(mock.active_count(), 0);
+    assert_eq!(
+        mock.active_count(),
+        0,
+        "Unexpected value for mock.active_count()"
+    );
     let events = mock.events();
     assert_eq!(
         events,
         vec![
             MockEvent::Acquired(1, AssertionKind::PreventSystemSleep),
             MockEvent::Released(1),
-        ]
+        ],
+        "Unexpected value for events"
     );
 }
 
@@ -278,8 +391,15 @@ fn controller_drop_on_inactive_is_safe_noop() {
         let _controller = PowerController::new(mock.clone());
     }
 
-    assert_eq!(mock.active_count(), 0);
-    assert!(mock.events().is_empty());
+    assert_eq!(
+        mock.active_count(),
+        0,
+        "Unexpected value for mock.active_count()"
+    );
+    assert!(
+        mock.events().is_empty(),
+        "Expected condition: mock.events().is_empty()"
+    );
 }
 
 #[test]
@@ -289,15 +409,33 @@ fn failed_acquisition_leaves_controller_inactive_and_returns_error() {
     let mut controller = PowerController::new(mock.clone());
     let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
 
-    let result = controller.start(Some(Duration::from_secs(3600)), false, now);
-    assert_eq!(result, Err(PowerError::AcquisitionFailed(-1)));
-    assert!(!controller.is_active());
-    assert!(!controller.keep_display_awake());
-    assert_eq!(controller.ends_at(), None);
-    assert_eq!(mock.active_count(), 0);
+    let result = controller.start(Some(Duration::from_hours(1)), false, now);
+    assert_eq!(
+        result,
+        Err(PowerError::AcquisitionFailed(-1)),
+        "Unexpected value for result"
+    );
+    assert!(
+        !controller.is_active(),
+        "Expected condition: !controller.is_active()"
+    );
+    assert!(
+        !controller.keep_display_awake(),
+        "Expected condition: !controller.keep_display_awake()"
+    );
+    assert_eq!(
+        controller.ends_at(),
+        None,
+        "Unexpected value for controller.ends_at()"
+    );
+    assert_eq!(
+        mock.active_count(),
+        0,
+        "Unexpected value for mock.active_count()"
+    );
 
     let events = mock.events();
-    assert!(events.is_empty());
+    assert!(events.is_empty(), "Expected condition: events.is_empty()");
 }
 
 #[test]
@@ -305,24 +443,45 @@ fn failed_acquisition_after_active_session_stops_previous_and_leaves_inactive() 
     let mock = MockAssertionProvider::default();
     let mut controller = PowerController::new(mock.clone());
     let now1 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
-    let now2 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_500);
+    let now2 = SystemTime::UNIX_EPOCH + Duration::from_mins(16_675);
 
-    assert!(
-        controller
-            .start(Some(Duration::from_secs(3600)), false, now1)
-            .is_ok()
+    assert_eq!(
+        controller.start(Some(Duration::from_hours(1)), false, now1),
+        Ok(()),
+        "Unexpected value for controller .start(Some(Duration::from_hours(1)), false, now1)"
     );
-    assert!(controller.is_active());
+    assert!(
+        controller.is_active(),
+        "Expected condition: controller.is_active()"
+    );
 
     // Make next acquisition fail with code 100
     mock.set_fail_code(100);
 
-    let result = controller.start(Some(Duration::from_secs(1800)), true, now2);
-    assert_eq!(result, Err(PowerError::AcquisitionFailed(100)));
-    assert!(!controller.is_active());
-    assert!(!controller.keep_display_awake());
-    assert_eq!(controller.ends_at(), None);
-    assert_eq!(mock.active_count(), 0);
+    let result = controller.start(Some(Duration::from_mins(30)), true, now2);
+    assert_eq!(
+        result,
+        Err(PowerError::AcquisitionFailed(100)),
+        "Unexpected value for result"
+    );
+    assert!(
+        !controller.is_active(),
+        "Expected condition: !controller.is_active()"
+    );
+    assert!(
+        !controller.keep_display_awake(),
+        "Expected condition: !controller.keep_display_awake()"
+    );
+    assert_eq!(
+        controller.ends_at(),
+        None,
+        "Unexpected value for controller.ends_at()"
+    );
+    assert_eq!(
+        mock.active_count(),
+        0,
+        "Unexpected value for mock.active_count()"
+    );
 
     let events = mock.events();
     assert_eq!(
@@ -330,7 +489,8 @@ fn failed_acquisition_after_active_session_stops_previous_and_leaves_inactive() 
         vec![
             MockEvent::Acquired(1, AssertionKind::PreventSystemSleep),
             MockEvent::Released(1),
-        ]
+        ],
+        "Unexpected value for events"
     );
 }
 
@@ -341,9 +501,27 @@ fn duration_overflow_leaves_controller_inactive() {
     let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
 
     let result = controller.start(Some(Duration::MAX), false, now);
-    assert_eq!(result, Err(PowerError::DurationOverflow));
-    assert!(!controller.is_active());
-    assert_eq!(controller.ends_at(), None);
-    assert_eq!(mock.active_count(), 0);
-    assert!(mock.events().is_empty());
+    assert_eq!(
+        result,
+        Err(PowerError::DurationOverflow),
+        "Unexpected value for result"
+    );
+    assert!(
+        !controller.is_active(),
+        "Expected condition: !controller.is_active()"
+    );
+    assert_eq!(
+        controller.ends_at(),
+        None,
+        "Unexpected value for controller.ends_at()"
+    );
+    assert_eq!(
+        mock.active_count(),
+        0,
+        "Unexpected value for mock.active_count()"
+    );
+    assert!(
+        mock.events().is_empty(),
+        "Expected condition: mock.events().is_empty()"
+    );
 }

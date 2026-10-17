@@ -10,20 +10,33 @@ use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_foundation::{NSArray, NSSize, NSString};
 /// UI dimensions and geometry constants.
 pub const MENU_WIDTH: f64 = 260.0;
+/// Outer content padding in points.
 pub const PADDING_OUTER: f64 = 16.0;
+/// Width available to controls after outer padding, in points.
 pub const CONTENT_WIDTH: f64 = MENU_WIDTH - 2.0 * PADDING_OUTER;
+/// Gap between control sections in points.
 pub const SPACING_SECTION: f64 = 14.0;
+/// Gap from section heading to its first row in points.
 pub const SPACING_HEADER_TO_ROW: f64 = 4.0;
+/// Gap between controls within a section, in points.
 pub const SPACING_INSIDE_SECTION: f64 = 6.0;
 
+/// Minimum single-line label height in points.
 pub const LABEL_HEIGHT: f64 = 16.0;
+/// Duration row height in points.
 pub const ROW_DURATION_HEIGHT: f64 = 32.0;
+/// Duration text field height in points.
 pub const DURATION_FIELD_HEIGHT: f64 = 28.0;
+/// Unit popup height in points.
 pub const POPUP_HEIGHT: f64 = 32.0;
+/// Duration text field width in points.
 pub const DURATION_FIELD_WIDTH: f64 = 72.0;
+/// Gap from duration field to unit popup in points.
 pub const SPACING_DURATION_POPUP: f64 = 8.0;
 
+/// Checkbox and radio row height in points.
 pub const CHECKBOX_HEIGHT: f64 = 20.0;
+/// Start/Stop button height in points.
 pub const BUTTON_HEIGHT: f64 = 30.0;
 
 /// Fixed height from the top of the popover through the bottom of the Start/Stop button.
@@ -43,33 +56,55 @@ pub const TOP_SECTION_HEIGHT: f64 = PADDING_OUTER
     + CHECKBOX_HEIGHT
     + SPACING_SECTION
     + BUTTON_HEIGHT;
+/// Countdown refresh interval in seconds.
 pub const COUNTDOWN_UPDATE_INTERVAL: f64 = 60.0;
+/// Countdown timer scheduling tolerance in seconds.
 pub const COUNTDOWN_TIMER_TOLERANCE: f64 = 15.0;
+/// Active lid-session thermal check interval in seconds.
 pub const THERMAL_CHECK_INTERVAL: f64 = 30.0;
 
 /// String constants for UI titles, SF Symbols, and messages.
 pub const ICON_INACTIVE: &str = "cup.and.saucer";
+/// SF Symbol name displayed during an active session.
 pub const ICON_ACTIVE: &str = "cup.and.saucer.fill";
+/// Idle primary action title.
 pub const TITLE_START: &str = "Start";
+/// Active primary action title.
 pub const TITLE_STOP: &str = "Stop";
+/// Context menu termination title.
 pub const TITLE_QUIT: &str = "Quit";
+/// Duration section heading.
 pub const TITLE_SECTION_DURATION: &str = "Keep awake for";
+/// Indefinite-session checkbox title.
 pub const TITLE_NO_TIME_LIMIT: &str = "No time limit";
+/// Awake-mode section heading.
 pub const TITLE_SECTION_MODE: &str = "While active";
+/// System-only awake-mode title.
 pub const TITLE_MODE_SYSTEM: &str = "Let the screen turn off";
+/// Display-awake mode title.
 pub const TITLE_MODE_DISPLAY: &str = "Keep the screen on";
+/// Lid-closed awake-mode title.
 pub const TITLE_MODE_LID: &str = "Keep running with lid closed";
+/// Placeholder for an empty duration input.
 pub const DURATION_PLACEHOLDER: &str = "Duration";
+/// Initial duration input; interpreted using the selected unit.
 pub const DEFAULT_DURATION_TEXT: &str = "2";
+/// Minutes unit menu title.
 pub const UNIT_MINUTES_TITLE: &str = "Minutes";
+/// Hours unit menu title.
 pub const UNIT_HOURS_TITLE: &str = "Hours";
+/// Days unit menu title.
 pub const UNIT_DAYS_TITLE: &str = "Days";
+/// Validation message for rejected duration input.
 pub const ERROR_DURATION_INVALID: &str = "Enter a whole number from 1 to 365 days.";
+/// Notice retained after thermal protection stops lid mode.
 pub const NOTICE_THERMAL_CUTOFF: &str = "Mac is too hot — lid-closed mode turned off.";
 
 /// Selected unit index in the unit popup button.
 pub const UNIT_MINUTES_INDEX: isize = 0;
+/// Hours entry index in the unit popup.
 pub const UNIT_HOURS_INDEX: isize = 1;
+/// Days entry index in the unit popup.
 pub const UNIT_DAYS_INDEX: isize = 2;
 
 /// Awake mode selection among exclusive options.
@@ -132,6 +167,7 @@ pub fn compute_ui_projection(
 }
 
 /// Container owning all `AppKit` UI controls created for the popover content view.
+#[derive(Debug)]
 pub struct PopoverControls {
     /// Root view containing all controls.
     pub view: Retained<NSView>,
@@ -192,9 +228,14 @@ impl PopoverControls {
 
     /// Positions visible footer labels under the Start/Stop button and resizes the content view.
     ///
-    /// Returns the total content height.
+    /// Returns the resulting content height in points.
     #[must_use]
     pub fn layout_footer(&self) -> f64 {
+        self.relayout_footer();
+        self.view.frame().size.height
+    }
+
+    fn relayout_footer(&self) {
         let labels = [&self.time_label, &self.error_label];
         let mut placements: [Option<(&NSTextField, f64, f64)>; 2] = [None, None];
         let mut cursor = TOP_SECTION_HEIGHT;
@@ -220,8 +261,6 @@ impl PopoverControls {
                 CGSize::new(CONTENT_WIDTH, h),
             ));
         }
-
-        total_height
     }
 }
 fn build_duration_row(
@@ -268,7 +307,11 @@ fn build_duration_row(
 fn build_mode_radios(
     mtm: MainThreadMarker,
 ) -> (Retained<NSButton>, Retained<NSButton>, Retained<NSButton>) {
-    // SAFETY: radioButtonWithTitle_target_action is called on the main thread.
+    #[expect(
+        unsafe_code,
+        reason = "AppKit control construction accepts optional target/action pointers"
+    )]
+    // SAFETY: radioButtonWithTitle_target_action is called on the main thread. Both target and action are None, so no callback ABI is required.
     let mode_system_button = unsafe {
         NSButton::radioButtonWithTitle_target_action(
             &NSString::from_str(TITLE_MODE_SYSTEM),
@@ -279,7 +322,11 @@ fn build_mode_radios(
     };
     mode_system_button.setState(NSControlStateValueOn);
 
-    // SAFETY: radioButtonWithTitle_target_action is called on the main thread.
+    #[expect(
+        unsafe_code,
+        reason = "AppKit control construction accepts optional target/action pointers"
+    )]
+    // SAFETY: radioButtonWithTitle_target_action is called on the main thread. Both target and action are None, so no callback ABI is required.
     let mode_display_button = unsafe {
         NSButton::radioButtonWithTitle_target_action(
             &NSString::from_str(TITLE_MODE_DISPLAY),
@@ -290,7 +337,11 @@ fn build_mode_radios(
     };
     mode_display_button.setState(NSControlStateValueOff);
 
-    // SAFETY: radioButtonWithTitle_target_action is called on the main thread.
+    #[expect(
+        unsafe_code,
+        reason = "AppKit control construction accepts optional target/action pointers"
+    )]
+    // SAFETY: radioButtonWithTitle_target_action is called on the main thread. Both target and action are None, so no callback ABI is required.
     let mode_lid_button = unsafe {
         NSButton::radioButtonWithTitle_target_action(
             &NSString::from_str(TITLE_MODE_LID),
@@ -306,7 +357,6 @@ fn build_mode_radios(
 
 /// Builds the popover content view hierarchy and initializes all controls.
 #[must_use]
-#[allow(deprecated)]
 pub fn build_content_view(mtm: MainThreadMarker) -> PopoverControls {
     let view_frame = CGRect::new(
         CGPoint::new(0.0, 0.0),
@@ -333,17 +383,7 @@ pub fn build_content_view(mtm: MainThreadMarker) -> PopoverControls {
     view.addSubview(&duration_field);
     view.addSubview(&unit_popup);
 
-    // 3. "No time limit" checkbox
-    // SAFETY: checkboxWithTitle_target_action is called on the main thread.
-    let no_time_limit_button = unsafe {
-        NSButton::checkboxWithTitle_target_action(
-            &NSString::from_str(TITLE_NO_TIME_LIMIT),
-            None,
-            None,
-            mtm,
-        )
-    };
-    no_time_limit_button.setState(NSControlStateValueOff);
+    let no_time_limit_button = build_no_time_limit_button(mtm);
     let no_time_limit_top = cursor;
     cursor += CHECKBOX_HEIGHT + SPACING_SECTION;
 
@@ -362,30 +402,18 @@ pub fn build_content_view(mtm: MainThreadMarker) -> PopoverControls {
     let mode_lid_top = cursor;
     cursor += CHECKBOX_HEIGHT + SPACING_SECTION;
 
+    #[expect(
+        unsafe_code,
+        reason = "AppKit control construction accepts optional target/action pointers"
+    )]
     // 8. Start / Stop button
-    // SAFETY: buttonWithTitle_target_action is called on the main thread.
+    // SAFETY: buttonWithTitle_target_action is called on the main thread. Both target and action are None, so no callback ABI is required.
     let start_stop_button = unsafe {
         NSButton::buttonWithTitle_target_action(&NSString::from_str(TITLE_START), None, None, mtm)
     };
-    start_stop_button.setBezelStyle(NSBezelStyle::Rounded);
+    start_stop_button.setBezelStyle(NSBezelStyle::Push);
     let start_stop_top = cursor;
-    // 9. Countdown / Status label
-    let time_label = NSTextField::wrappingLabelWithString(&NSString::from_str(""), mtm);
-    time_label.setTextColor(Some(&NSColor::secondaryLabelColor()));
-    time_label.setPreferredMaxLayoutWidth(width);
-    time_label.setSelectable(false);
-    time_label.setHidden(true);
-    time_label.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinYMargin);
-    view.addSubview(&time_label);
-
-    // 10. Error label
-    let error_label = NSTextField::wrappingLabelWithString(&NSString::from_str(""), mtm);
-    error_label.setTextColor(Some(&NSColor::systemRedColor()));
-    error_label.setPreferredMaxLayoutWidth(width);
-    error_label.setSelectable(false);
-    error_label.setHidden(true);
-    error_label.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinYMargin);
-    view.addSubview(&error_label);
+    let (time_label, error_label) = build_footer_labels(mtm, &view);
 
     let place = |v: &NSView, top: f64, h: f64| {
         let y = TOP_SECTION_HEIGHT - top - h;
@@ -414,6 +442,50 @@ pub fn build_content_view(mtm: MainThreadMarker) -> PopoverControls {
         start_stop_button,
         error_label,
     };
-    let _ = controls.layout_footer();
+    controls.relayout_footer();
     controls
+}
+
+fn build_footer_labels(
+    mtm: MainThreadMarker,
+    view: &NSView,
+) -> (Retained<NSTextField>, Retained<NSTextField>) {
+    // 9. Countdown / Status label
+    let time_label = NSTextField::wrappingLabelWithString(&NSString::from_str(""), mtm);
+    time_label.setTextColor(Some(&NSColor::secondaryLabelColor()));
+    time_label.setPreferredMaxLayoutWidth(CONTENT_WIDTH);
+    time_label.setSelectable(false);
+    time_label.setHidden(true);
+    time_label.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinYMargin);
+    view.addSubview(&time_label);
+
+    // 10. Error label
+    let error_label = NSTextField::wrappingLabelWithString(&NSString::from_str(""), mtm);
+    error_label.setTextColor(Some(&NSColor::systemRedColor()));
+    error_label.setPreferredMaxLayoutWidth(CONTENT_WIDTH);
+    error_label.setSelectable(false);
+    error_label.setHidden(true);
+    error_label.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinYMargin);
+    view.addSubview(&error_label);
+
+    (time_label, error_label)
+}
+
+fn build_no_time_limit_button(mtm: MainThreadMarker) -> Retained<NSButton> {
+    #[expect(
+        unsafe_code,
+        reason = "AppKit control construction accepts optional target/action pointers"
+    )]
+    // 3. "No time limit" checkbox
+    // SAFETY: checkboxWithTitle_target_action is called on the main thread. Both target and action are None, so no callback ABI is required.
+    let no_time_limit_button = unsafe {
+        NSButton::checkboxWithTitle_target_action(
+            &NSString::from_str(TITLE_NO_TIME_LIMIT),
+            None,
+            None,
+            mtm,
+        )
+    };
+    no_time_limit_button.setState(NSControlStateValueOff);
+    no_time_limit_button
 }
