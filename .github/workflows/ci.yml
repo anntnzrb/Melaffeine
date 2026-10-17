@@ -7,6 +7,9 @@ on:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -18,13 +21,77 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@main
+        uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
 
       - name: Nix Flake Checks
         run: nix flake check
 
       - name: Build CLI Package (melaffeine)
         run: nix build .#cli
+
+  gates:
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+      - run: nix develop -c cargo fmt --all --check
+      - run: nix develop -c cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - run: nix develop -c cargo nextest run --workspace --all-features --locked
+      - run: nix develop -c uv run --script .gate/governance-check.py --doctests
+      - run: nix develop -c cargo doc --no-deps --workspace --all-features --locked
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+      - run: nix develop -c cargo deny --locked check
+      - run: nix develop -c cargo machete
+
+  governance:
+    if: github.event_name == 'pull_request'
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+      - name: Run the base branch's governance check
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          git show "origin/${BASE_REF}:.gate/governance-check.py" > "$RUNNER_TEMP/governance-check.py"
+          nix develop -c uv run --script "$RUNNER_TEMP/governance-check.py" "origin/${BASE_REF}" --inventory
+
+  mutants:
+    if: github.event_name == 'pull_request'
+    runs-on: macos-14
+    timeout-minutes: 60
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+      - name: Test mutations in the pull request diff
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          RUSTC_WORKSPACE_WRAPPER: ${{ runner.temp }}/cap-lints-rustc
+          CARGO_TARGET_DIR: ${{ runner.temp }}/mutants-target
+        run: |
+          printf '%s\n' '#!/bin/sh' 'exec "$@" --cap-lints=warn' > "$RUNNER_TEMP/cap-lints-rustc"
+          chmod 700 "$RUNNER_TEMP/cap-lints-rustc"
+          git diff "origin/${BASE_REF}...HEAD" > "$RUNNER_TEMP/pr.diff"
+          nix develop -c cargo mutants --in-diff "$RUNNER_TEMP/pr.diff" --test-tool nextest --output "$RUNNER_TEMP"

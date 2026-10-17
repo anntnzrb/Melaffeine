@@ -1,0 +1,11 @@
+# Native AppKit and IOKit adapters contain unsafe operations and deprecated AppKit calls.
+crates/app/src/app_delegate.rs
+crates/app/src/iokit.rs
+crates/app/src/ui.rs
+
+# The IPC accept loop backs off with a blocking sleep on its dedicated thread.
+crates/app/src/ipc_server.rs
+
+# AppKit integration tests contain unsafe calls, a custom harness that prints results,
+# and need a governed Miri exclusion.
+crates/app/tests/main_thread_app.rs

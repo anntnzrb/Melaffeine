@@ -3,16 +3,10 @@
   perSystem =
     { pkgs, system, ... }:
     let
-      rustToolchain = inputs.fenix.packages.${system}.stable.withComponents [
-        "cargo"
-        "rustc"
-        "rust-std"
-        "clippy"
-        "rustfmt"
-        "rust-src"
-        "rust-analyzer"
-        "llvm-tools"
-      ];
+      rustToolchain = inputs.fenix.packages.${system}.fromToolchainFile {
+        file = ../../rust-toolchain.toml;
+        sha256 = "sha256-P30Tm3O7vQAE725YtDCDHGjNrSsfZO4us11UwJGZSJo=";
+      };
       craneLib = (inputs.crane.mkLib pkgs).overrideToolchain rustToolchain;
       plistFilter =
         path: _type:
