@@ -14,10 +14,10 @@ use app::ui::{
 };
 use app_core::ipc::{IpcCommand, IpcResponse, SessionStatus};
 use objc2::runtime::ProtocolObject;
-use objc2::{DefinedClass, MainThreadMarker, msg_send};
+use objc2::{DefinedClass, MainThreadMarker, msg_send, sel};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSControlStateValueOff, NSControlStateValueOn,
-    NSEventTrackingRunLoopMode,
+    NSEventMask, NSEventTrackingRunLoopMode,
 };
 use objc2_foundation::{NSDate, NSNotification, NSRunLoop, NSString};
 // The custom harness exit status is its single test result.
@@ -234,6 +234,8 @@ fn run_harness() -> Option<()> {
     let unrelated = files.dir.join("unrelated.sock");
     let _unrelated_listener = harness_value(std::os::unix::net::UnixListener::bind(&unrelated))?;
     check_initial_controls(mtm);
+    check_stale_recovery(mtm, &app)?;
+    check_teardown(mtm, &app)?;
     let harness = initialize_harness(mtm, &app, files.environment())?;
     assert!(
         unrelated.exists(),
@@ -246,8 +248,10 @@ fn run_harness() -> Option<()> {
     );
     harness_value(std::fs::write(&files.state, "0"))?;
     check_delegate_controls(&harness);
+    check_control_wiring(&harness)?;
     check_indefinite_lid_selection(&harness)?;
     check_noninteractive_lid(&harness, &files)?;
+    check_interactive_authorization(&harness, &files)?;
     check_fake_lid_session(&harness, &files)?;
     check_inline_errors(&harness)?;
     check_finite_session(&harness);
@@ -257,7 +261,7 @@ fn run_harness() -> Option<()> {
     check_unit_selection(&harness);
     check_failed_quit(&harness, &files)?;
     check_busy_state(&harness)?;
-    check_popover_session(&harness);
+    check_popover_session(&harness)?;
     check_ipc_invalid_toggle(&harness);
     check_ipc_finite_start(&harness);
     check_ipc_stop_toggle(&harness);
@@ -265,9 +269,243 @@ fn run_harness() -> Option<()> {
     check_expiry(&harness)?;
     check_tracking_expiry(&harness)?;
     check_native_popover_close(&harness)?;
+    check_popover_focus_log(&harness, &files)?;
+    check_thermal_cutoff(&harness, &files)?;
     check_termination(&harness);
     render_if_requested(&harness)?;
     check_quit(&harness);
+    Some(())
+}
+
+fn check_stale_recovery(mtm: MainThreadMarker, app: &NSApplication) -> Option<()> {
+    let files = IsolatedFiles::new()?;
+    let harness = initialize_harness(mtm, app, files.environment().with_failed_recovery())?;
+    assert_eq!(
+        harness.error_label.stringValue().to_string(),
+        "Couldn't restore normal sleep: couldn't reset sleep suppression: isolated recovery failure. Run `sudo pmset -a disablesleep 0` in Terminal.",
+        "startup recovery failure must show complete actionable restoration message"
+    );
+    assert!(
+        !harness.error_label.isHidden(),
+        "startup recovery error must be visible"
+    );
+    Some(())
+}
+
+fn check_control_wiring(harness: &Harness) -> Option<()> {
+    let button = harness
+        .status_item
+        .button(MainThreadMarker::from(&*harness.delegate))?;
+    let expected_mask = NSEventMask::LeftMouseUp | NSEventMask::RightMouseUp;
+    let previous = button.sendActionOn(expected_mask);
+    button.sendActionOn(NSEventMask::from_bits_retain(u64::try_from(previous).ok()?));
+    assert_eq!(
+        u64::try_from(previous).ok(),
+        Some(expected_mask.bits()),
+        "status button must dispatch both mouse buttons"
+    );
+    for (control, action) in [
+        (&**button, sel!(statusItemClicked:)),
+        (&*harness.no_time_limit_button, sel!(noTimeLimitChanged:)),
+        (&*harness.mode_system_button, sel!(awakeModeChanged:)),
+        (&*harness.mode_display_button, sel!(awakeModeChanged:)),
+        (&*harness.mode_lid_button, sel!(awakeModeChanged:)),
+        (&*harness.start_stop_button, sel!(startStopClicked:)),
+    ] {
+        assert_eq!(
+            control.target().as_deref().map(std::ptr::from_ref),
+            Some(std::ptr::from_ref(&*harness.delegate).cast()),
+            "control must dispatch to owning delegate"
+        );
+        assert_eq!(
+            control.action(),
+            Some(action),
+            "control must dispatch its expected action"
+        );
+    }
+    Some(())
+}
+
+fn check_interactive_authorization(harness: &Harness, files: &IsolatedFiles) -> Option<()> {
+    harness
+        .no_time_limit_button
+        .setState(NSControlStateValueOff);
+    harness
+        .duration_field
+        .setStringValue(&NSString::from_str("1"));
+    harness_value(harness.delegate.ivars().state.try_borrow())?
+        .as_ref()?
+        .controls
+        .set_awake_mode(AwakeMode::LidClosed);
+    let marker = files.dir.join("state.fail-1");
+    harness_value(std::fs::write(&marker, ""))?;
+    let result = harness.delegate.handle_start_stop(true);
+    harness_value(std::fs::remove_file(marker))?;
+    assert_eq!(
+        result,
+        Err(String::from(
+            "Lid-closed authorization is unavailable in this environment."
+        )),
+        "interactive fake failure must refuse authorization without launching osascript"
+    );
+    assert_eq!(
+        harness.error_label.stringValue().to_string(),
+        "Lid-closed authorization is unavailable in this environment.",
+        "authorization refusal must be visible"
+    );
+    Some(())
+}
+
+fn check_cool_thermal_state(harness: &Harness, files: &IsolatedFiles) -> Option<()> {
+    let delegate = &*harness.delegate;
+    harness
+        .no_time_limit_button
+        .setState(NSControlStateValueOff);
+    harness
+        .duration_field
+        .setStringValue(&NSString::from_str("1"));
+    harness_value(delegate.ivars().state.try_borrow())?
+        .as_ref()?
+        .controls
+        .set_awake_mode(AwakeMode::LidClosed);
+    assert_eq!(
+        delegate.handle_start_stop(true),
+        Ok(true),
+        "start fake finite lid session"
+    );
+    delegate
+        .ivars()
+        .environment
+        .set_thermal(ThermalSource::Fixed(false));
+    delegate.check_thermal_state_for_test();
+    {
+        let state = harness_value(delegate.ivars().state.try_borrow())?;
+        let state = state.as_ref()?;
+        assert!(
+            state.lid.is_some(),
+            "cool thermal check must preserve lid session"
+        );
+        assert!(
+            state.thermal_timer.is_some(),
+            "cool thermal check must preserve guard timer"
+        );
+        assert_eq!(
+            state.controls.awake_mode(),
+            AwakeMode::LidClosed,
+            "cool check must preserve mode"
+        );
+        assert!(
+            state.power.is_active(),
+            "cool check must preserve power assertion"
+        );
+    }
+    assert_eq!(
+        harness_value(std::fs::read_to_string(&files.state))?,
+        "1",
+        "cool check must preserve fake sleep suppression"
+    );
+    Some(())
+}
+
+fn check_thermal_cutoff(harness: &Harness, files: &IsolatedFiles) -> Option<()> {
+    check_cool_thermal_state(harness, files)?;
+    let delegate = &*harness.delegate;
+    delegate
+        .ivars()
+        .environment
+        .set_thermal(ThermalSource::Fixed(true));
+    delegate.check_thermal_state_for_test();
+    {
+        let state = harness_value(delegate.ivars().state.try_borrow())?;
+        let state = state.as_ref()?;
+        assert!(state.lid.is_none(), "hot check must release lid session");
+        assert!(
+            state.thermal_timer.is_none(),
+            "hot check must remove thermal timer"
+        );
+        assert!(
+            state.power.is_active(),
+            "hot check must preserve ordinary power assertion"
+        );
+        assert_eq!(
+            state.controls.awake_mode(),
+            AwakeMode::SystemOnly,
+            "hot check must reset awake mode"
+        );
+    }
+    assert_eq!(
+        harness_value(std::fs::read_to_string(&files.state))?,
+        "0",
+        "hot check must restore fake sleep setting"
+    );
+    assert_eq!(
+        harness.error_label.stringValue().to_string(),
+        "Mac is too hot — lid-closed mode turned off.",
+        "thermal cutoff must explain mode change"
+    );
+    assert!(
+        !harness.error_label.isHidden(),
+        "thermal notice must be visible"
+    );
+    delegate
+        .ivars()
+        .environment
+        .set_thermal(ThermalSource::Fixed(false));
+    assert!(
+        delegate.stop_session().is_ok(),
+        "stop remaining ordinary session"
+    );
+    Some(())
+}
+
+fn check_teardown(mtm: MainThreadMarker, app: &NSApplication) -> Option<()> {
+    let files = IsolatedFiles::new()?;
+    let harness = initialize_harness(mtm, app, files.environment())?;
+    let delegate = &*harness.delegate;
+    assert!(
+        delegate
+            .start_session(Some(Duration::from_secs(60)), false)
+            .is_ok(),
+        "start finite teardown fixture"
+    );
+    {
+        let state = harness_value(delegate.ivars().state.try_borrow())?;
+        let state = state.as_ref()?;
+        assert!(
+            state.power.is_active(),
+            "teardown fixture must have active power"
+        );
+        assert!(
+            state.ipc_server.is_some(),
+            "teardown fixture must have IPC server"
+        );
+        assert!(
+            state.expiry_timer.is_some(),
+            "finite session must have expiry timer"
+        );
+    }
+    let socket = files.dir.join("ipc.sock");
+    assert!(socket.exists(), "teardown fixture must publish socket");
+    delegate.teardown();
+    {
+        let state = harness_value(delegate.ivars().state.try_borrow())?;
+        let state = state.as_ref()?;
+        assert!(
+            !state.power.is_active(),
+            "teardown must release power assertion"
+        );
+        assert!(
+            state.ipc_server.is_none(),
+            "teardown must remove IPC server"
+        );
+        assert!(
+            state.expiry_timer.is_none()
+                && state.countdown_timer.is_none()
+                && state.thermal_timer.is_none(),
+            "teardown must remove all timers"
+        );
+        assert!(!socket.exists(), "teardown must unlink IPC socket");
+    }
     Some(())
 }
 
@@ -1034,7 +1272,7 @@ fn check_unit_selection(harness: &Harness) {
     );
 }
 
-fn check_popover_session(harness: &Harness) {
+fn check_popover_session(harness: &Harness) -> Option<()> {
     let delegate = &*harness.delegate;
     let duration_field = &*harness.duration_field;
     let unit_popup = &*harness.unit_popup;
@@ -1044,6 +1282,15 @@ fn check_popover_session(harness: &Harness) {
     // Popover toggle
     if let Some(button) = status_item.button(mtm) {
         delegate.toggle_popover_relative_to(&button);
+        let popover = harness_value(delegate.ivars().state.try_borrow())?
+            .as_ref()?
+            .popover
+            .clone();
+        let opening = Instant::now();
+        while !popover.isShown() && opening.elapsed() < Duration::from_secs(3) {
+            NSRunLoop::currentRunLoop().runUntilDate(&NSDate::dateWithTimeIntervalSinceNow(0.05));
+        }
+        assert!(popover.isShown(), "first toggle must show popover");
 
         duration_field.setStringValue(&NSString::from_str("10"));
         unit_popup.selectItemAtIndex(UNIT_MINUTES_INDEX);
@@ -1059,6 +1306,11 @@ fn check_popover_session(harness: &Harness) {
         );
 
         delegate.toggle_popover_relative_to(&button);
+        let closing = Instant::now();
+        while popover.isShown() && closing.elapsed() < Duration::from_secs(3) {
+            NSRunLoop::currentRunLoop().runUntilDate(&NSDate::dateWithTimeIntervalSinceNow(0.05));
+        }
+        assert!(!popover.isShown(), "second toggle must hide popover");
         delegate.close_popover();
         assert_eq!(
             delegate.stop_session().map_err(|error| error.to_string()),
@@ -1077,6 +1329,55 @@ fn check_popover_session(harness: &Harness) {
         IpcResponse::Status(None),
         "Unexpected value for status_resp"
     );
+    Some(())
+}
+
+fn capture_logs<T>(path: &std::path::Path, action: impl FnOnce() -> T) -> Option<(T, String)> {
+    let log_file = harness_value(std::fs::File::create(path))?;
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_max_level(tracing::Level::DEBUG)
+        .with_writer(std::sync::Mutex::new(log_file))
+        .finish();
+    let result = tracing::subscriber::with_default(subscriber, action);
+    Some((result, harness_value(std::fs::read_to_string(path))?))
+}
+
+fn check_popover_focus_log(harness: &Harness, files: &IsolatedFiles) -> Option<()> {
+    let delegate = &*harness.delegate;
+    let button = harness
+        .status_item
+        .button(MainThreadMarker::from(delegate))?;
+    let ((), log) = capture_logs(&files.dir.join("focus.log"), || {
+        delegate.toggle_popover_relative_to(&button);
+    })?;
+    let popover = harness_value(delegate.ivars().state.try_borrow())?
+        .as_ref()?
+        .popover
+        .clone();
+    let opening = Instant::now();
+    while !popover.isShown() && opening.elapsed() < Duration::from_secs(3) {
+        NSRunLoop::currentRunLoop().runUntilDate(&NSDate::dateWithTimeIntervalSinceNow(0.05));
+    }
+    assert!(popover.isShown(), "focus test must open popover");
+    let window = popover.contentViewController()?.view().window()?;
+    assert_eq!(
+        window.firstResponder().as_deref().map(std::ptr::from_ref),
+        Some(std::ptr::from_ref(&**window)),
+        "opening popover must clear the field responder to the window"
+    );
+    assert!(
+        !log.contains("popover window refused to clear its first responder"),
+        "successful focus clearing must not log a refusal: {log}"
+    );
+    delegate.close_popover();
+    let closing = Instant::now();
+    while popover.isShown() && closing.elapsed() < Duration::from_secs(3) {
+        NSRunLoop::currentRunLoop().runUntilDate(&NSDate::dateWithTimeIntervalSinceNow(0.05));
+    }
+    assert!(!popover.isShown(), "focus test must close popover");
+    Some(())
 }
 
 fn check_ipc_invalid_toggle(harness: &Harness) {
@@ -1430,7 +1731,13 @@ fn check_failed_quit(harness: &Harness, files: &IsolatedFiles) -> Option<()> {
     );
     let marker = files.dir.join("state.fail-0");
     harness_value(std::fs::write(&marker, ""))?;
-    let response = delegate.execute_ipc_command(&IpcCommand::Quit);
+    let (response, log) = capture_logs(&files.dir.join("restore.log"), || {
+        delegate.execute_ipc_command(&IpcCommand::Quit)
+    })?;
+    assert!(
+        log.contains("session operation failed") && log.contains("fake failure 0"),
+        "failed restoration must be logged with its cause: {log}"
+    );
     assert!(
         matches!(response, IpcResponse::Err(ref message) if message.starts_with("Couldn't restore normal sleep: ") && message.contains("fake failure 0")),
         "Quit must reject failed restore: {response:?}"

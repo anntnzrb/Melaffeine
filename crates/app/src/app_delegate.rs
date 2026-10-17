@@ -1046,6 +1046,12 @@ impl AppDelegate {
         }
     }
 
+    /// Runs the thermal timer callback immediately for isolated lifecycle tests.
+    #[cfg(feature = "test-util")]
+    pub fn check_thermal_state_for_test(&self) {
+        self.check_thermal_state();
+    }
+
     /// Takes the active lid-closed session and invalidates its thermal guard timer.
     fn take_lid_session(state: &mut AppState) -> Option<crate::lid::LidSession> {
         if let Some(timer) = state.thermal_timer.take() {

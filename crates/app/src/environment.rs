@@ -12,6 +12,9 @@ pub enum StaleRecovery {
     System,
     /// Leave system settings untouched.
     Skip,
+    /// Report a deterministic restoration failure without touching system settings.
+    #[cfg(feature = "test-util")]
+    Failed,
 }
 
 /// Whether administrator authorization is available.
@@ -86,6 +89,14 @@ impl AppEnvironment {
         self.thermal.set(thermal);
     }
 
+    /// Injects a startup recovery failure without running any power command.
+    #[cfg(feature = "test-util")]
+    #[must_use]
+    pub const fn with_failed_recovery(mut self) -> Self {
+        self.stale_recovery = StaleRecovery::Failed;
+        self
+    }
+
     pub(crate) fn ipc_socket(&self) -> Option<&std::path::Path> {
         self.ipc_socket.as_deref()
     }
@@ -94,6 +105,10 @@ impl AppEnvironment {
         match self.stale_recovery {
             StaleRecovery::System => lid::reset_if_stale(),
             StaleRecovery::Skip => Ok(()),
+            #[cfg(feature = "test-util")]
+            StaleRecovery::Failed => Err(LidError::Reset {
+                detail: String::from("isolated recovery failure"),
+            }),
         }
     }
 
