@@ -1,0 +1,26 @@
+# Human-approved mutation exclusions. Each entry is an exact mutant name that
+# no in-process test can kill, with the reason it is equivalent or untestable.
+# Review again whenever the named code changes.
+exclude_re = [
+  # Binary entrypoints: exercised only by launching the real app/CLI process.
+  '^crates/app/src/main\.rs:\d+:\d+: replace main with \(\)$',
+  '^crates/app/src/main\.rs:\d+:\d+: delete ! in main$',
+  '^crates/cli/src/main\.rs:\d+:\d+: replace main -> ExitCode with Default::default\(\)$',
+  # Terminates the process / runs a blocking NSMenu tracking loop.
+  '^crates/app/src/app_delegate\.rs:\d+:\d+: replace AppDelegate::terminate_app with \(\)$',
+  '^crates/app/src/app_delegate\.rs:\d+:\d+: replace AppDelegate::show_context_menu with \(\)$',
+  # Equivalent: LeftMouseUp and RightMouseUp are disjoint bits, so | and ^ are identical.
+  '^crates/app/src/app_delegate\.rs:\d+:\d+: replace \| with \^ in AppDelegate::init_app_state$',
+  # Equivalent: NONBLOCK is unset before the fcntl, and poll IN/HUP are disjoint bits.
+  '^crates/app/src/lid\.rs:\d+:\d+: replace \| with \^ in drain_diagnostics$',
+  # Real IOKit assertion release; not observable without system power APIs.
+  '^crates/app/src/iokit\.rs:\d+:\d+: replace <impl Drop for IOKitAssertion>::drop with \(\)$',
+  '^crates/app/src/iokit\.rs:\d+:\d+: replace != with == in <impl Drop for IOKitAssertion>::drop$',
+  # Runs the real `pmset`/`sudo`; tests must never change system power settings.
+  '^crates/app/src/lid\.rs:\d+:\d+: replace reset_if_stale -> Result<\(\), LidError> with Ok\(\(\)\)$',
+  '^crates/app/src/lid\.rs:\d+:\d+: delete ! in reset_if_stale$',
+  '^crates/app/src/lid\.rs:\d+:\d+: replace set_sleep_disabled -> Result<\(\), String> with Ok\(\(\)\)$',
+  # Detected by the EOF unit test, but the mutated drain also spins forever in the guardian
+  # tests and nextest waits on them on cancel, so cargo-mutants reports a timeout.
+  '^crates/app/src/lid\.rs:\d+:\d+: replace diagnostic_read_result -> io::Result<Option<usize>> with Ok\(Some\(0\)\)$',
+]
