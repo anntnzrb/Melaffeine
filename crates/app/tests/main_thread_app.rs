@@ -1339,7 +1339,12 @@ fn check_native_popover_close(harness: &Harness) -> Option<()> {
         state.popover.clone()
     };
     popover.close();
-    NSRunLoop::currentRunLoop().runUntilDate(&NSDate::dateWithTimeIntervalSinceNow(0.1));
+    // Closing animates; wait for AppKit to finish instead of assuming a fixed duration.
+    let run_loop = NSRunLoop::currentRunLoop();
+    let started = Instant::now();
+    while popover.isShown() && started.elapsed() < Duration::from_secs(3) {
+        run_loop.runUntilDate(&NSDate::dateWithTimeIntervalSinceNow(0.05));
+    }
     {
         let state = delegate.ivars().state.borrow();
         let state = state.as_ref()?;
