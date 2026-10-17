@@ -424,3 +424,38 @@ fn instance_lock_rejects_directory() {
     );
     assert!(path.is_dir(), "directory must remain untouched");
 }
+
+#[test]
+fn instance_lock_rejects_owned_fifo() {
+    let temp = TestDir::new();
+    let path = lock_path_in(&temp.0);
+    let status = std::process::Command::new("/usr/bin/mkfifo")
+        .arg(&path)
+        .status()
+        .expect("create owned FIFO at lock path");
+    assert!(status.success(), "FIFO fixture creation must succeed");
+    assert!(
+        matches!(app_core::ipc::open_instance_lock(&path), Err(app_core::ipc::LockError::Invalid { path: rejected }) if rejected == path),
+        "an owned non-regular descriptor must fail validation"
+    );
+}
+
+#[test]
+fn private_runtime_directory_rejects_parent_that_is_a_file() {
+    let temp = TestDir::new();
+    let parent = temp.0.join("file");
+    fs::write(&parent, b"preserve me").expect("create non-directory parent");
+    let dir = parent.join("runtime");
+    assert!(
+        matches!(
+            ensure_private_dir(&dir),
+            Err(RuntimeDirError::Filesystem { .. })
+        ),
+        "a non-directory parent must propagate a filesystem failure"
+    );
+    assert_eq!(
+        fs::read(parent).expect("inspect preserved parent"),
+        b"preserve me",
+        "failed runtime preparation must not change the parent file"
+    );
+}

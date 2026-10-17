@@ -143,12 +143,95 @@ pub fn open_instance_lock(path: &Path) -> Result<fs::File, LockError> {
         path: path.to_path_buf(),
         source,
     })?;
-    if !metadata.is_file() || metadata.uid() != effective_uid() {
+    if !valid_lock(metadata.is_file(), metadata.uid(), effective_uid()) {
         return Err(LockError::Invalid {
             path: path.to_path_buf(),
         });
     }
     Ok(file)
+}
+
+const fn valid_lock(is_file: bool, uid: u32, euid: u32) -> bool {
+    is_file && uid == euid
+}
+
+const fn needs_tightening(mode: u32) -> bool {
+    mode & 0o077 != 0
+}
+
+fn directory_creation_result(result: io::Result<()>) -> io::Result<()> {
+    match result {
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+        result => result,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_lock_path_uses_runtime_directory() {
+        assert_eq!(
+            lock_path().expect("resolve lock path"),
+            runtime_dir()
+                .expect("resolve runtime directory")
+                .join("melaffeine.lock"),
+            "default lock must use the exact per-user runtime path"
+        );
+    }
+
+    #[test]
+    fn lock_validation_requires_both_regular_file_and_current_owner() {
+        for (is_file, uid, expected) in [
+            (true, 501, true),
+            (true, 502, false),
+            (false, 501, false),
+            (false, 502, false),
+        ] {
+            assert_eq!(
+                valid_lock(is_file, uid, 501),
+                expected,
+                "only a regular file owned by the effective user is a valid lock"
+            );
+        }
+    }
+
+    #[test]
+    fn private_directory_permissions_only_need_tightening_when_shared() {
+        for mode in [0o700, 0o400, 0o040_700] {
+            assert!(
+                !needs_tightening(mode),
+                "owner-only permissions must not trigger chmod: {mode:o}"
+            );
+        }
+        for mode in [0o701, 0o710, 0o740, 0o770, 0o777] {
+            assert!(
+                needs_tightening(mode),
+                "shared permission bits must trigger chmod: {mode:o}"
+            );
+        }
+    }
+
+    #[test]
+    fn directory_creation_only_tolerates_existing_path_errors() {
+        directory_creation_result(Ok(())).expect("successful creation is accepted");
+        directory_creation_result(Err(io::Error::from(io::ErrorKind::AlreadyExists)))
+            .expect("existing path proceeds to ownership and type validation");
+        for kind in [
+            io::ErrorKind::NotADirectory,
+            io::ErrorKind::PermissionDenied,
+            io::ErrorKind::NotFound,
+        ] {
+            assert_eq!(
+                directory_creation_result(Err(io::Error::from(kind)))
+                    .expect_err("creation failures must propagate")
+                    .kind(),
+                kind,
+                "only AlreadyExists can proceed to validation"
+            );
+        }
+    }
 }
 
 fn runtime_fs_error(operation: &'static str, path: &Path, source: io::Error) -> RuntimeDirError {
@@ -182,13 +265,10 @@ pub fn ensure_private_dir(dir: &Path) -> Result<(), RuntimeDirError> {
         fs::create_dir_all(parent)
             .map_err(|source| runtime_fs_error("create parent directory", parent, source))?;
     }
-    match fs::DirBuilder::new().mode(0o700).create(dir) {
-        Ok(()) => {}
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-        Err(source) => return Err(runtime_fs_error("create directory", dir, source)),
-    }
+    directory_creation_result(fs::DirBuilder::new().mode(0o700).create(dir))
+        .map_err(|source| runtime_fs_error("create directory", dir, source))?;
     let metadata = private_dir_metadata(dir)?;
-    if metadata.mode() & 0o077 != 0 {
+    if needs_tightening(metadata.mode()) {
         fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
             .map_err(|source| runtime_fs_error("set private permissions on", dir, source))?;
         if private_dir_metadata(dir)?.mode() & 0o077 != 0 {
