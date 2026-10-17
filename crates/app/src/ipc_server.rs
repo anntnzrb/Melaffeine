@@ -31,10 +31,23 @@ type Handler = Box<dyn Fn(&IpcCommand) -> IpcResponse>;
 fn remove_socket_if_owned(path: &Path, identity: (u64, u64)) {
     if let Ok(metadata) = fs::symlink_metadata(path)
         && (metadata.dev(), metadata.ino()) == identity
-        && let Err(error) = fs::remove_file(path)
-        && error.kind() != ErrorKind::NotFound
+        && let Err(error) = remove_socket_file(path)
     {
         tracing::warn!(%error, path = %path.display(), "failed to remove owned IPC socket");
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum SocketRemoval {
+    Removed,
+    Missing,
+}
+
+fn remove_socket_file(path: &Path) -> io::Result<SocketRemoval> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(SocketRemoval::Removed),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(SocketRemoval::Missing),
+        Err(error) => Err(error),
     }
 }
 
@@ -54,7 +67,15 @@ fn socket_metadata(path: &Path) -> Option<fs::Metadata> {
 }
 
 fn bind_listener(path: &Path, expected_uid: u32) -> Option<(UnixListener, (u64, u64))> {
-    let listener = match UnixListener::bind(path) {
+    bind_listener_with(path, expected_uid, |path| UnixListener::bind(path))
+}
+
+fn bind_listener_with(
+    path: &Path,
+    expected_uid: u32,
+    mut bind: impl FnMut(&Path) -> io::Result<UnixListener>,
+) -> Option<(UnixListener, (u64, u64))> {
+    let listener = match bind(path) {
         Ok(listener) => listener,
         Err(bind_error) if bind_error.kind() == ErrorKind::AddrInUse => {
             let metadata = socket_metadata(path)?;
@@ -68,13 +89,15 @@ fn bind_listener(path: &Path, expected_uid: u32) -> Option<(UnixListener, (u64, 
             if probe_live_owner(path) {
                 return None;
             }
-            if let Err(error) = fs::remove_file(path) {
-                if error.kind() != ErrorKind::NotFound {
+            match remove_socket_file(path) {
+                Ok(SocketRemoval::Removed) => {}
+                Ok(SocketRemoval::Missing) => return None,
+                Err(error) => {
                     tracing::warn!(%error, path = %path.display(), "failed to remove stale IPC socket");
+                    return None;
                 }
-                return None;
             }
-            match UnixListener::bind(path) {
+            match bind(path) {
                 Ok(listener) => listener,
                 Err(error) => {
                     tracing::warn!(%error, path = %path.display(), "failed to bind replacement IPC socket");
@@ -104,24 +127,39 @@ const fn same_owner(uid: u32, euid: u32) -> bool {
 
 fn read_frame(stream: &mut UnixStream, budget: Duration) -> io::Result<Vec<u8>> {
     let started = Instant::now();
+    read_frame_with(
+        |chunk, limit, remaining| {
+            stream.set_read_timeout(Some(remaining))?;
+            Ok((&mut *stream).take(limit).read(chunk))
+        },
+        || started.elapsed(),
+        budget,
+    )
+}
+
+fn read_frame_with(
+    // The outer result configures the timeout; only the inner read may retry EINTR.
+    mut read: impl FnMut(&mut [u8], u64, Duration) -> io::Result<io::Result<usize>>,
+    mut elapsed: impl FnMut() -> Duration,
+    budget: Duration,
+) -> io::Result<Vec<u8>> {
     let mut frame = Vec::new();
     let mut chunk = [0_u8; 512];
     loop {
         // Saturation turns an exhausted absolute budget into a timeout, never a fresh budget.
-        let remaining = budget.saturating_sub(started.elapsed());
+        let remaining = budget.saturating_sub(elapsed());
         if remaining.is_zero() {
             return Err(io::Error::from(ErrorKind::TimedOut));
         }
-        stream.set_read_timeout(Some(remaining))?;
         let capacity = MAX_FRAME_BYTES
             .saturating_add(1)
             .saturating_sub(frame.len());
         let limit = u64::try_from(capacity).unwrap_or(u64::MAX);
-        let length = match (&mut *stream).take(limit).read(&mut chunk) {
+        let length = match read(&mut chunk, limit, remaining)? {
             Err(error) if error.kind() == ErrorKind::Interrupted => continue,
             result => result?,
         };
-        if length == 0 || started.elapsed() >= budget {
+        if length == 0 || elapsed() >= budget {
             return Err(io::Error::from(ErrorKind::TimedOut));
         }
         for byte in chunk.iter().take(length) {
@@ -181,6 +219,28 @@ fn serve_connection(stream: UnixStream, handler: impl FnOnce(&IpcCommand) -> Ipc
 
 type ActiveConnection = Arc<Mutex<Option<UnixStream>>>;
 
+#[derive(Debug, PartialEq, Eq)]
+enum AcceptErrorAction {
+    Retry,
+    Backoff,
+    LogAndBackoff,
+}
+
+fn accept_error_action(error: &io::Error, last: Option<ErrorKind>) -> AcceptErrorAction {
+    match error {
+        error
+            if matches!(
+                error.kind(),
+                ErrorKind::Interrupted | ErrorKind::ConnectionAborted
+            ) =>
+        {
+            AcceptErrorAction::Retry
+        }
+        error if last != Some(error.kind()) => AcceptErrorAction::LogAndBackoff,
+        _ => AcceptErrorAction::Backoff,
+    }
+}
+
 fn active_slot(active: &ActiveConnection) -> MutexGuard<'_, Option<UnixStream>> {
     active.lock().unwrap_or_else(|poisoned| {
         tracing::warn!("recovering poisoned IPC active-connection slot");
@@ -221,15 +281,14 @@ fn accept_connections(
                 }
                 *active_slot(active) = None;
             }
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    ErrorKind::Interrupted | ErrorKind::ConnectionAborted
-                ) => {}
             Err(error) => {
-                if last_error_kind != Some(error.kind()) {
-                    tracing::error!(%error, "IPC accept error");
-                    last_error_kind = Some(error.kind());
+                match accept_error_action(&error, last_error_kind) {
+                    AcceptErrorAction::Retry => continue,
+                    AcceptErrorAction::Backoff => {}
+                    AcceptErrorAction::LogAndBackoff => {
+                        tracing::error!(%error, "IPC accept error");
+                        last_error_kind = Some(error.kind());
+                    }
                 }
                 #[expect(
                     clippy::disallowed_methods,
@@ -325,6 +384,205 @@ mod tests {
     use std::io::{BufRead, BufReader};
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    #[test]
+    fn socket_removal_distinguishes_missing_removed_and_failed() {
+        let path = temporary_path("removal");
+        let listener = UnixListener::bind(&path).expect("bind removal fixture");
+        assert_eq!(
+            remove_socket_file(&path).expect("remove socket"),
+            SocketRemoval::Removed,
+            "existing socket must report removal"
+        );
+        assert_eq!(
+            remove_socket_file(&path).expect("missing socket is harmless"),
+            SocketRemoval::Missing,
+            "already removed socket must not produce a warning error"
+        );
+        drop(listener);
+        let directory = path.parent().expect("fixture directory");
+        assert!(
+            remove_socket_file(directory).is_err(),
+            "real unlink failures must remain errors"
+        );
+        fs::remove_dir(directory).expect("clean removal fixture");
+    }
+
+    #[test]
+    fn non_address_bind_error_never_removes_existing_socket() {
+        let path = temporary_path("bind-error");
+        let listener = UnixListener::bind(&path).expect("bind stale fixture");
+        drop(listener);
+        let before = fs::symlink_metadata(&path).expect("inspect stale fixture");
+        let mut attempts = 0;
+        let result = bind_listener_with(&path, effective_uid(), |_| {
+            attempts += 1;
+            Err(io::Error::from(ErrorKind::PermissionDenied))
+        });
+        let after = fs::symlink_metadata(&path).expect("non-address failure must preserve socket");
+        assert!(
+            result.is_none(),
+            "unrelated bind failure cannot establish a listener"
+        );
+        assert_eq!(
+            attempts, 1,
+            "unrelated bind failure must not retry after stale cleanup"
+        );
+        assert_eq!(
+            (after.dev(), after.ino()),
+            (before.dev(), before.ino()),
+            "unrelated bind failure must not unlink the existing object"
+        );
+        fs::remove_file(&path).expect("clean stale fixture");
+        fs::remove_dir(path.parent().expect("fixture directory")).expect("clean bind fixture");
+    }
+
+    #[test]
+    fn exact_frame_limit_is_accepted_and_one_extra_byte_is_rejected() {
+        for (size, accepted) in [
+            (MAX_FRAME_BYTES, true),
+            (MAX_FRAME_BYTES.saturating_add(1), false),
+        ] {
+            let mut bytes = vec![b'x'; size.saturating_sub(1)];
+            bytes.push(b'\n');
+            let mut input = io::Cursor::new(&bytes);
+            let result = read_frame_with(
+                |chunk, limit, _| Ok((&mut input).take(limit).read(chunk)),
+                || Duration::ZERO,
+                Duration::from_secs(1),
+            );
+            if accepted {
+                assert_eq!(
+                    result.expect("exact limit frame must fit"),
+                    bytes,
+                    "frame limit includes its terminating newline"
+                );
+            } else {
+                assert_eq!(
+                    result.expect_err("oversized frame must fail").kind(),
+                    ErrorKind::InvalidData,
+                    "one byte over the frame limit must be rejected"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn interrupted_frame_read_retries_but_other_errors_propagate() {
+        let mut calls = 0;
+        let frame = read_frame_with(
+            |chunk, _, _| {
+                calls += 1;
+                if calls == 1 {
+                    return Ok(Err(io::Error::from(ErrorKind::Interrupted)));
+                }
+                let mut input = &b"STATUS\n"[..];
+                Ok(input.read(chunk))
+            },
+            || Duration::ZERO,
+            Duration::from_secs(1),
+        );
+        assert_eq!(
+            frame.expect("retry interrupted read"),
+            b"STATUS\n",
+            "retry must preserve the frame"
+        );
+        assert_eq!(calls, 2, "interrupted read must be retried once");
+        let mut errors = [ErrorKind::PermissionDenied, ErrorKind::BrokenPipe].into_iter();
+        let error = read_frame_with(
+            |_, _, _| {
+                Ok(Err(io::Error::from(
+                    errors.next().expect("fatal read must not be retried"),
+                )))
+            },
+            || Duration::ZERO,
+            Duration::from_secs(1),
+        )
+        .expect_err("fatal read must fail");
+        assert_eq!(
+            error.kind(),
+            ErrorKind::PermissionDenied,
+            "first fatal error must propagate"
+        );
+    }
+
+    #[test]
+    fn eof_before_deadline_and_data_at_deadline_both_time_out() {
+        let mut reads = std::iter::once(Ok(0));
+        let eof = read_frame_with(
+            |_, _, _| Ok(reads.next().expect("EOF must not trigger another read")),
+            || Duration::ZERO,
+            Duration::from_secs(1),
+        );
+        assert_eq!(
+            eof.expect_err("EOF is not a frame").kind(),
+            ErrorKind::TimedOut,
+            "EOF must terminate before the budget expires"
+        );
+        let mut clock = [Duration::ZERO, Duration::from_secs(1)].into_iter();
+        let late = read_frame_with(
+            |chunk, _, _| Ok((&b"STATUS\n"[..]).read(chunk)),
+            || {
+                clock
+                    .next()
+                    .expect("late data must be rejected immediately")
+            },
+            Duration::from_secs(1),
+        );
+        assert_eq!(
+            late.expect_err("late frame must fail").kind(),
+            ErrorKind::TimedOut,
+            "a successful read must still respect the absolute deadline"
+        );
+    }
+
+    #[test]
+    fn frame_timeout_configuration_errors_are_not_retried() {
+        let mut errors = std::iter::once(ErrorKind::Interrupted);
+        let result = read_frame_with(
+            |_, _, _| {
+                Err(io::Error::from(
+                    errors.next().expect("configuration must not retry"),
+                ))
+            },
+            || Duration::ZERO,
+            Duration::from_secs(1),
+        );
+        assert_eq!(
+            result.expect_err("timeout configuration failed").kind(),
+            ErrorKind::Interrupted,
+            "configuration failures must propagate even when the error is Interrupted"
+        );
+    }
+
+    #[test]
+    fn accept_errors_retry_transient_failures_and_deduplicate_logs() {
+        let action = |kind, last| accept_error_action(&io::Error::from(kind), last);
+        for kind in [ErrorKind::Interrupted, ErrorKind::ConnectionAborted] {
+            assert_eq!(
+                action(kind, None),
+                AcceptErrorAction::Retry,
+                "transient accept errors must retry without backoff"
+            );
+        }
+        assert_eq!(
+            action(ErrorKind::PermissionDenied, None),
+            AcceptErrorAction::LogAndBackoff,
+            "first persistent error must be logged and backed off"
+        );
+        assert_eq!(
+            action(
+                ErrorKind::PermissionDenied,
+                Some(ErrorKind::PermissionDenied)
+            ),
+            AcceptErrorAction::Backoff,
+            "repeated persistent error must back off without log spam"
+        );
+        assert_eq!(
+            action(ErrorKind::PermissionDenied, Some(ErrorKind::NotFound)),
+            AcceptErrorAction::LogAndBackoff,
+            "a changed persistent error must be logged again"
+        );
+    }
     static NEXT_PATH_ID: AtomicU64 = AtomicU64::new(0);
 
     fn temporary_path(label: &str) -> PathBuf {
