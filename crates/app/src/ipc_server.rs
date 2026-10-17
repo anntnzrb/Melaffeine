@@ -385,6 +385,30 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     #[test]
+    fn dropping_server_removes_socket_and_stops_worker() {
+        let path = temporary_path("drop");
+        let mut server =
+            IpcServer::start_with(&path, |_| IpcResponse::Status(None), Duration::from_secs(1))
+                .expect("start drop test server");
+        assert!(path.exists(), "running server must publish its socket");
+        // Retain the join handle so this test also waits for the cancelled worker.
+        let worker = server.worker.take().expect("server worker handle");
+        drop(server);
+        let removed = !path.exists();
+        let disconnected = UnixStream::connect(&path).is_err();
+        assert!(
+            removed,
+            "Drop must unlink the server socket without explicit stop"
+        );
+        assert!(disconnected, "clients must not connect after server Drop");
+        assert!(
+            worker.join().is_ok(),
+            "Drop must wake and stop the accept worker"
+        );
+        fs::remove_dir(path.parent().expect("test directory")).expect("clean drop test directory");
+    }
+
+    #[test]
     fn socket_removal_distinguishes_missing_removed_and_failed() {
         let path = temporary_path("removal");
         let listener = UnixListener::bind(&path).expect("bind removal fixture");
