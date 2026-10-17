@@ -24,7 +24,8 @@
             inherit cargoArtifacts;
             partitions = 1;
             partitionType = "count";
-            cargoNextestExtraArgs = "--workspace --no-tests=pass";
+            # AppKit integration requires a user WindowServer session, absent in the Nix sandbox.
+            cargoNextestExtraArgs = "--workspace --all-features --no-tests=pass -E 'not binary(main_thread_app)'";
           }
         );
       };
