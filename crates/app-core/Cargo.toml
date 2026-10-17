@@ -6,7 +6,8 @@ publish.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-rustix = { workspace = true }
+thiserror.workspace = true
+rustix = { workspace = true, features = ["fs"] }
 
 [lints]
 workspace = true

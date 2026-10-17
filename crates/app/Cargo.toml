@@ -13,7 +13,17 @@ path = "src/lib.rs"
 name = "Melaffeine"
 path = "src/main.rs"
 
+[features]
+test-util = []
+
+[dev-dependencies]
+app = { path = ".", features = ["test-util"] }
+
 [dependencies]
+rustix = { workspace = true, features = ["event", "fs"] }
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
 app-core.workspace = true
 objc2.workspace = true
 block2.workspace = true
