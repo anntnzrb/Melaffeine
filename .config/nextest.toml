@@ -1,0 +1,4 @@
+# Terminate hung tests so they fail instead of stalling the run. This also makes
+# cargo-mutants report a mutant that hangs a test as caught rather than as a timeout.
+[profile.default]
+slow-timeout = { period = "15s", terminate-after = 1 }
