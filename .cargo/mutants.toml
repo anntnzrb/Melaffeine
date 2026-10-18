@@ -20,7 +20,4 @@ exclude_re = [
   '^crates/app/src/lid\.rs:\d+:\d+: replace reset_if_stale -> Result<\(\), LidError> with Ok\(\(\)\)$',
   '^crates/app/src/lid\.rs:\d+:\d+: delete ! in reset_if_stale$',
   '^crates/app/src/lid\.rs:\d+:\d+: replace set_sleep_disabled -> Result<\(\), String> with Ok\(\(\)\)$',
-  # Detected by the EOF unit test, but the mutated drain also spins forever in the guardian
-  # tests and nextest waits on them on cancel, so cargo-mutants reports a timeout.
-  '^crates/app/src/lid\.rs:\d+:\d+: replace diagnostic_read_result -> io::Result<Option<usize>> with Ok\(Some\(0\)\)$',
 ]
